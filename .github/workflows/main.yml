@@ -114,7 +114,6 @@ jobs:
           $publicDesktop = "C:\Users\Public\Desktop"
           if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
 
-          # REDFINING Administrator Desktop path in this step
           $adminDesktop = "C:\Users\Administrator\Desktop"
           $adminDesktopExists = Test-Path $adminDesktop
 
@@ -163,6 +162,18 @@ jobs:
           } catch {
             Write-Error "Failed during download/extract/deploy: $_"
             exit 1
+          }
+
+      - name: Install VS Code from Administrator Desktop
+        run: |
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64-1.103.0.exe"
+
+          if (Test-Path $vscodeInstaller) {
+              Write-Host "Installing VS Code silently..."
+              Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
+          } else {
+              Write-Host "VS Code installer not found on Administrator Desktop."
           }
 
       - name: Maintain RDP Connection
