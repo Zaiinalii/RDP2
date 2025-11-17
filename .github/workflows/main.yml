@@ -98,38 +98,25 @@ jobs:
 
       - name: Download and Extract sOFTWARES
         run: |
-          # Ensure script runs as Administrator
-          if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            Write-Error "This step requires Administrator privileges."
-            exit 1
-          }
-
           # Variables
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
           $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
+
+          # *** FIXED: Save to REAL Administrator desktop ***
           $desktopPath = "C:\Users\Administrator\Desktop"
 
           try {
-            if (-not (Test-Path $desktopPath)) {
-              New-Item -ItemType Directory -Path $desktopPath -Force | Out-Null
-            }
-
+            # Download the RAR
             Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
 
+            # Ensure 7-Zip is installed (check both Program Files locations)
             $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
             $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
             if (-not $sevenZipExe) {
-              Write-Host "7-Zip not found. Attempting to install..."
-              if (Get-Command choco -ErrorAction SilentlyContinue) {
-                Start-Process -FilePath "choco" -ArgumentList "install 7zip -y" -Wait -NoNewWindow
-              } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-                winget install --id=7zip.7zip -e --accept-package-agreements --accept-source-agreements
-              } else {
-                Write-Error "No installer available for 7-Zip (choco/winget not found)."
-                exit 1
-              }
+              choco install 7zip -y
+              # Re-evaluate path after install
               $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
             }
 
@@ -138,11 +125,14 @@ jobs:
               exit 1
             }
 
+            # Prepare extraction folder
             if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
             New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
+            # Extract the RAR (use 7z)
             & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
 
+            # Copy all extracted content (files and folders) to Administrator Desktop
             Get-ChildItem -Path $extractPath -Force | ForEach-Object {
               $dest = Join-Path $desktopPath $_.Name
               if ($_.PSIsContainer) {
@@ -152,10 +142,11 @@ jobs:
               }
             }
 
+            # Clean up
             Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
             Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
 
-            Write-Host "sOFTWARES downloaded, extracted, and copied to $desktopPath."
+            Write-Host "sOFTWARES downloaded, extracted, and all contents copied to Administrator Desktop."
           } catch {
             Write-Error "Failed to download/extract/copy sOFTWARES: $_"
             exit 1
@@ -165,9 +156,11 @@ jobs:
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Credentials: $env:RDP_CREDS"
+          Write-Host "Username: Administrator"
+          Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
+          # Keep runner active indefinitely (or until manually canceled)
           while ($true) {
-        Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
-        Start-Sleep -Seconds 300
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
+              Start-Sleep -Seconds 300
           }
