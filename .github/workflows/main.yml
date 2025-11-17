@@ -164,16 +164,26 @@ jobs:
             exit 1
           }
 
-      - name: Install VS Code from Administrator Desktop
+      - name: Install VS Code and PIA from Administrator Desktop
         run: |
           $adminDesktop = "C:\Users\Administrator\Desktop"
-          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64-1.103.0.exe"
 
+          # Install VS Code
+          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64-1.103.0.exe"
           if (Test-Path $vscodeInstaller) {
               Write-Host "Installing VS Code silently..."
               Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
           } else {
               Write-Host "VS Code installer not found on Administrator Desktop."
+          }
+
+          # Install PIA
+          $piaInstaller = Join-Path $adminDesktop "pia-windows-x64-3.6.1-08339.exe"
+          if (Test-Path $piaInstaller) {
+              Write-Host "Installing PIA silently..."
+              Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait
+          } else {
+              Write-Host "PIA installer not found on Administrator Desktop."
           }
 
       - name: Maintain RDP Connection
