@@ -97,61 +97,71 @@ jobs:
           Write-Host "TCP connectivity successful!"
 
       - name: Download and Extract sOFTWARES
-        run: |
-          # Variables
-          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
-          $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
-          $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
-          $desktopPath = Join-Path $env:USERPROFILE "Desktop"
+         run: |
+        # Variables
+        $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+        $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
+        $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
+        $adminDesktop = "C:\Users\Administrator\Desktop"
 
-          try {
-            # Download the RAR
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+        try {
+          # Ensure Administrator Desktop exists
+          if (-not (Test-Path $adminDesktop)) {
+            New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
+          }
 
-            # Ensure 7-Zip is installed (check both Program Files locations)
-            $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
+          # Download the RAR
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+
+          # Ensure 7-Zip is installed (check both Program Files locations)
+          $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
+          $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $sevenZipExe) {
+            choco install 7zip -y
+            # Re-evaluate path after install
             $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
 
-            if (-not $sevenZipExe) {
-              choco install 7zip -y
-              # Re-evaluate path after install
-              $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            }
-
-            if (-not $sevenZipExe) {
-              Write-Error "7-Zip not found or failed to install."
-              exit 1
-            }
-
-            # Prepare extraction folder
-            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-
-            # Extract the RAR (use 7z)
-            & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
-
-            # Copy all extracted content (files and folders) to Desktop
-            # Use Get-ChildItem to ensure items are copied individually preserving folder structure
-            Get-ChildItem -Path $extractPath -Force | ForEach-Object {
-              $dest = Join-Path $desktopPath $_.Name
-              if ($_.PSIsContainer) {
-                Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
-              } else {
-                Copy-Item -Path $_.FullName -Destination $desktopPath -Force -ErrorAction Stop
-              }
-            }
-
-            # Clean up downloaded archive and temporary extraction folder
-            Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-
-            Write-Host "sOFTWARES downloaded, extracted, and all contents copied to Desktop."
-          } catch {
-            Write-Error "Failed to download/extract/copy sOFTWARES: $_"
+          if (-not $sevenZipExe) {
+            Write-Error "7-Zip not found or failed to install."
             exit 1
           }
 
-      - name: Maintain RDP Connection
+          # Prepare extraction folder
+          if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
+          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+
+          # Extract the RAR (use 7z)
+          & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
+
+          # Copy all extracted content (files and folders) to Administrator Desktop
+          Get-ChildItem -Path $extractPath -Force | ForEach-Object {
+            $dest = Join-Path $adminDesktop $_.Name
+            if ($_.PSIsContainer) {
+           Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
+            } else {
+           Copy-Item -Path $_.FullName -Destination $adminDesktop -Force -ErrorAction Stop
+            }
+          }
+
+          # Ensure Administrator has full control on the copied files
+          try {
+            takeown /f $adminDesktop /r /d Y | Out-Null
+            icacls $adminDesktop /grant Administrator:(OI)(CI)F /T | Out-Null
+          } catch {
+            Write-Warning "Failed to explicitly set ownership/permissions on $adminDesktop: $_"
+          }
+
+          # Clean up downloaded archive and temporary extraction folder
+          Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
+          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "sOFTWARES downloaded, extracted, and copied to $adminDesktop."
+        } catch {
+          Write-Error "Failed to download/extract/copy sOFTWARES: $_"
+          exit 1
+        }    - name: Maintain RDP Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
