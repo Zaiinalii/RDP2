@@ -82,14 +82,19 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Ensure Administrator Profile & Desktop
+      - name: Ensure Administrator Profile & Desktop (Robocopy)
         run: |
           $adminProfile = "C:\Users\Administrator"
-          if (-not (Test-Path $adminProfile)) {
-            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force
-            icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
-          }
           $adminDesktop = "$adminProfile\Desktop"
+
+          if (-not (Test-Path $adminProfile)) {
+              Write-Host "Administrator profile missing — creating from Default..."
+              robocopy "C:\Users\Default" $adminProfile /MIR /XD "AppData\Local\Application Data" /MT:4
+              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+          } else {
+              Write-Host "Administrator profile already exists."
+          }
+
           if (-not (Test-Path $adminDesktop)) { New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null }
 
       - name: Download, Extract and Deploy sOFTWARES Contents
