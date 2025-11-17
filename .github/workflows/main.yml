@@ -114,6 +114,8 @@ jobs:
           $publicDesktop = "C:\Users\Public\Desktop"
           if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
 
+          # REDFINING Administrator Desktop path in this step
+          $adminDesktop = "C:\Users\Administrator\Desktop"
           $adminDesktopExists = Test-Path $adminDesktop
 
           try {
