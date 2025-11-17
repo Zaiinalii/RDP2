@@ -87,54 +87,42 @@ jobs:
 
       - name: Force Create Administrator Profile (best-effort)
         run: |
-          # Best-effort creation of Administrator profile (profile normally created at first interactive login)
           $adminProfile = "C:\Users\Administrator"
           if (-not (Test-Path $adminProfile)) {
             Write-Host "Administrator profile missing — attempting to create from Default..."
-            # Copy Default profile skeleton to Administrator folder
             Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
-            # Set basic permissions so Administrator can use it
             try {
               icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
             } catch {
-              Write-Host "icacls failed to set ownership/permissions; continuing - this may be fine."
+              Write-Host "icacls failed to set permissions; continuing."
             }
           } else {
             Write-Host "Administrator profile already exists."
           }
 
-          # Ensure Administrator Desktop exists if profile created
           $adminDesktop = "C:\Users\Administrator\Desktop"
           if (-not (Test-Path $adminDesktop)) {
             New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
           }
 
-      - name: Download, Extract and Deploy (Path Method)
+      - name: Download, Extract and Deploy (Contents Only)
         run: |
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
           $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
 
-          # PRIMARY guaranteed path (Path Method)
           $publicDesktop = "C:\Users\Public\Desktop"
-          if (-not (Test-Path $publicDesktop)) {
-            New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null
-          }
+          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
 
-          # SECONDARY path: Administrator Desktop (only if exists)
-          $adminDesktop = "C:\Users\Administrator\Desktop"
           $adminDesktopExists = Test-Path $adminDesktop
 
           try {
-            Write-Host "Downloading archive..."
             Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
 
-            Write-Host "Locating 7-Zip..."
             $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
             $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
             if (-not $sevenZipExe) {
-              Write-Host "7-Zip not found, installing via choco..."
               choco install 7zip -y
               $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
             }
@@ -144,45 +132,32 @@ jobs:
               exit 1
             }
 
-            # Clean and create extraction folder
             if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
             New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
-            Write-Host "Extracting archive to temp..."
             & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
 
-            Write-Host "Deploying files to Public Desktop (guaranteed)..."
-            # Copy everything to Public Desktop
-            Get-ChildItem -Path $extractPath -Force | ForEach-Object {
-              if ($_.PSIsContainer) {
-                $dest = Join-Path $publicDesktop $_.Name
-                Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
-              } else {
-                Copy-Item -Path $_.FullName -Destination $publicDesktop -Force -ErrorAction Stop
-              }
+            # Find inner folder
+            $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+            if (-not $innerFolder) { Write-Error "No folder found in archive."; exit 1 }
+
+            Write-Host "Copying CONTENTS to Public Desktop..."
+            Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
+              $dest = Join-Path $publicDesktop $_.Name
+              if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
             }
 
             if ($adminDesktopExists) {
-              Write-Host "Also deploying to Administrator Desktop..."
-              Get-ChildItem -Path $extractPath -Force | ForEach-Object {
-                if ($_.PSIsContainer) {
-                  $dest = Join-Path $adminDesktop $_.Name
-                  Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
-                } else {
-                  Copy-Item -Path $_.FullName -Destination $adminDesktop -Force -ErrorAction Stop
-                }
+              Write-Host "Copying CONTENTS to Administrator Desktop..."
+              Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
+                $dest = Join-Path $adminDesktop $_.Name
+                if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
               }
-            } else {
-              Write-Host "Administrator Desktop does not exist — skipped secondary copy."
             }
 
-            # Clean up
             Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
             Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
 
-            Write-Host "Deployment complete. Files placed in:"
-            Write-Host " - $publicDesktop"
-            if ($adminDesktopExists) { Write-Host " - $adminDesktop" } else { Write-Host " - Administrator Desktop (not present)" }
           } catch {
             Write-Error "Failed during download/extract/deploy: $_"
             exit 1
