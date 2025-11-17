@@ -87,14 +87,13 @@ jobs:
 
       - name: Force Create Administrator Profile
         run: |
-          # Create missing Administrator profile by copying from Default profile
           $adminProfile = "C:\Users\Administrator"
+
           if (-not (Test-Path $adminProfile)) {
             Write-Host "Administrator profile missing — creating it now..."
             Copy-Item "C:\Users\Default" $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-          # Ensure Desktop exists
           $desktop = "C:\Users\Administrator\Desktop"
           if (-not (Test-Path $desktop)) {
             New-Item -ItemType Directory -Path $desktop -Force | Out-Null
@@ -105,8 +104,6 @@ jobs:
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
           $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
-
-          # FIXED: Correct administrator desktop
           $desktopPath = "C:\Users\Administrator\Desktop"
 
           try {
@@ -125,7 +122,7 @@ jobs:
               exit 1
             }
 
-            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
+            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
             New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
             & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
@@ -139,12 +136,12 @@ jobs:
               }
             }
 
-            Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $downloadPath -Force
+            Remove-Item $extractPath -Recurse -Force
 
             Write-Host "Software extracted and saved to Administrator Desktop."
           } catch {
-            Write-Error "Failed to download/extract/copy sOFTWARES: $_"
+            Write-Error "Failed: $_"
             exit 1
           }
 
