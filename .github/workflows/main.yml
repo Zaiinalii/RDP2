@@ -13,134 +13,200 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
-      - name: Configure RDP Settings
+      - name: Configure Core RDP Settings
         run: |
-          # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 0 -Force
-          # Disable NLA
+                             -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "UserAuthentication" -Value 0 -Force
+                             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "SecurityLayer" -Value 0 -Force
-
-          # Open firewall
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
-
+                             -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Set Administrator Password (Admin@1111)
+      - name: Create RDP User with Fixed Password
         run: |
-          $password = "Admin@1111"
+          $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # Ensure Administrator account exists
           if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
               Set-LocalUser -Name "Administrator" -Password $securePass
           } else {
               New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
           }
-
-          # Add to groups
-          Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          if (-not (Get-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue)) {
+              Add-LocalGroupMember -Group "Administrators" -Member "Administrator"
+          }
+          if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue)) {
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator"
+          }
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $path = "$env:TEMP\tailscale.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-          Invoke-WebRequest -Uri $url -OutFile $path
-          Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
-          Remove-Item $path -Force
-
-      - name: Login to Tailscale
+      - name: Establish Tailscale Connection
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          # Get Tailscale IPv4
-          $tries = 0
-          do {
-              $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep 3
-              $tries++
-          } until ($ip -or $tries -ge 10)
-
-          if (-not $ip) { Write-Error "No Tailscale IP received"; exit 1 }
-
-          echo "TS_IP=$ip" >> $env:GITHUB_ENV
-
-      - name: Download and Extract SOFTWARES and Move to Administrator Desktop
-        run: |
-          # Administrator Desktop
-          $adminDesktop = "C:\Users\Administrator\Desktop"
-          if (-not (Test-Path $adminDesktop)) {
-              New-Item -Path $adminDesktop -ItemType Directory -Force | Out-Null
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
 
-          # URLs and Paths
-          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
-          $rarPath = Join-Path $env:TEMP "sOFTWARES.rar"
-          $extractPath = Join-Path $env:TEMP "sOFTWARES_extract"
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
 
-          try {
-              # Download archive
-              Invoke-WebRequest -Uri $downloadUrl -OutFile $rarPath -UseBasicParsing
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-              # Detect 7-zip or install
-              $sevenZip = @(
-                "C:\Program Files\7-Zip\7z.exe",
-                "C:\Program Files (x86)\7-Zip\7z.exe"
-              ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-              if (-not $sevenZip) {
-                  choco install 7zip -y
-                  $sevenZip = @(
-                    "C:\Program Files\7-Zip\7z.exe",
-                    "C:\Program Files (x86)\7-Zip\7z.exe"
-                  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-              }
-
-              if (-not $sevenZip) {
-                  Write-Error "7-Zip missing."
-                  exit 1
-              }
-
-              # Prepare extract folder
-              if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
-              New-Item -Path $extractPath -ItemType Directory -Force | Out-Null
-
-              # Extract archive
-              & "$sevenZip" x "$rarPath" "-o$extractPath" -y
-
-              # Move EVERYTHING to Admin Desktop
-              Get-ChildItem -Path $extractPath -Force | ForEach-Object {
-                  Move-Item -Path $_.FullName -Destination $adminDesktop -Force
-              }
-
-              # Clean up
-              Remove-Item $rarPath -Force
-              Remove-Item $extractPath -Recurse -Force
-
-              Write-Host "All files moved to Administrator Desktop."
-
-          } catch {
-              Write-Error "Extraction failed: $_"
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
+          Write-Host "TCP connectivity successful!"
 
-      - name: Keep RDP Alive
+      - name: Force Create Administrator Profile (best-effort)
         run: |
-          Write-Host "`n=== RDP DETAILS ==="
-          Write-Host "IP: $env:TS_IP"
-          Write-Host "User: Administrator"
-          Write-Host "Password: Admin@1111"
-          Write-Host "=====================`n"
+          $adminProfile = "C:\Users\Administrator"
+          if (-not (Test-Path $adminProfile)) {
+            Write-Host "Administrator profile missing — creating from Default..."
+            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+            } catch {
+              Write-Host "icacls failed to set permissions; continuing."
+            }
+          }
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+          if (-not (Test-Path $adminDesktop)) {
+            New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
+          }
+
+      - name: Download, Extract and Deploy (DEBUG VERBOSE)
+        run: |
+          Write-Host "=== DEBUG: START DOWNLOAD/EXTRACT STEP ==="
+
+          $downloadUrl   = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+          $downloadPath  = Join-Path $env:TEMP "sOFTWARES.rar"
+          $extractPath   = Join-Path $env:TEMP "sOFTWARES_extracted"
+          $adminProfile  = "C:\Users\Administrator"
+          $adminDesktop  = "C:\Users\Administrator\Desktop"
+
+          Write-Host "DEBUG: Admin profile path: $adminProfile"
+          Write-Host "DEBUG: Admin Desktop path: $adminDesktop"
+
+          Write-Host "`nDEBUG: Checking Administrator profile"
+          Write-Host "Exists? $(Test-Path $adminProfile)"
+
+          if (-not (Test-Path $adminProfile)) {
+              Write-Host "Creating Administrator profile..."
+              Copy-Item "C:\Users\Default" $adminProfile -Recurse -Force
+          }
+
+          Write-Host "`nDEBUG: Checking Desktop path"
+          Write-Host "Exists? $(Test-Path $adminDesktop)"
+
+          if (-not (Test-Path $adminDesktop)) {
+              Write-Host "Creating Desktop..."
+              New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
+          }
+
+          Write-Host "`n=== Administrator Profile Contents (before copy) ==="
+          Get-ChildItem -Path $adminProfile -Recurse | Select-Object FullName
+
+          Write-Host "`n=== Administrator Desktop (before copy) ==="
+          Get-ChildItem -Path $adminDesktop -ErrorAction SilentlyContinue | Select-Object FullName
+
+          # Download rar
+          Write-Host "`nDownloading archive to $downloadPath"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+
+          Write-Host "`nDownloaded file:"
+          Get-Item $downloadPath | Format-List *
+
+          # 7-Zip setup
+          $sevenZipCandidates = @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe"
+          )
+          $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $sevenZipExe) {
+              Write-Host "Installing 7-Zip..."
+              choco install 7zip -y
+              $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+
+          Write-Host "7z path: $sevenZipExe"
+
+          if (-not $sevenZipExe) { Write-Error "7z not found; cannot extract."; exit 1 }
+
+          if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
+          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+
+          Write-Host "Extracting archive..."
+          & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
+
+          Write-Host "`n=== Extracted Contents ==="
+          Get-ChildItem -Path $extractPath | Select-Object FullName
+
+          $inner = Get-ChildItem $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+          Write-Host "Inner folder = $($inner.FullName)"
+
+          # Copy files
+          Write-Host "`nCopying files → Administrator Desktop"
+          Get-ChildItem -Path $inner.FullName | ForEach-Object {
+              Write-Host "Copying: $($_.FullName)"
+              $dest = Join-Path $adminDesktop $_.Name
+              if ($_.PSIsContainer) {
+                  Copy-Item $_.FullName $dest -Recurse -Force
+              } else {
+                  Copy-Item $_.FullName $dest -Force
+              }
+          }
+
+          Write-Host "`n=== Administrator Desktop (after copy) ==="
+          Get-ChildItem -Path $adminDesktop | Select-Object FullName
+
+          Write-Host "`n=== Administrator Profile ACL ==="
+          icacls $adminProfile
+
+          Write-Host "=== DEBUG COMPLETE ==="
+
+      - name: Install VS Code and PIA from Administrator Desktop
+        run: |
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+
+          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64-1.103.0.exe"
+          if (Test-Path $vscodeInstaller) {
+              Start-Process $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
+          }
+
+          $piaInstaller = Join-Path $adminDesktop "pia-windows-x64-3.6.1-08339.exe"
+          if (Test-Path $piaInstaller) {
+              Start-Process $piaInstaller -ArgumentList "/S" -Wait
+          }
+
+      - name: Maintain RDP Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: Administrator"
+          Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "==================`n"
 
           while ($true) {
-              Write-Host "[$(Get-Date)] Running..."
+              Write-Host "[$(Get-Date)] RDP Active"
               Start-Sleep -Seconds 300
           }
