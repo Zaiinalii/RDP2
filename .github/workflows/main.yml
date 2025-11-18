@@ -28,8 +28,8 @@ jobs:
 
       - name: Create RDP User with Fixed Password (1111)
         run: |
-          # Set password to 1111
-          $password = '1111'
+          # Set password to Za.rty123
+          $password = 'Za.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
