@@ -26,21 +26,20 @@ jobs:
 
       - name: Create RDP User with Fixed Password
         run: |
-          $username = 'Nadeem'
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-              Set-LocalUser -Name $username -Password $securePass
+          if (Get-LocalUser -Name "Nadeem" -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name "Nadeem" -Password $securePass
           } else {
-              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+              New-LocalUser -Name "Nadeem" -Password $securePass -AccountNeverExpires
           }
-          if (-not (Get-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Administrators" -Member $username
+          if (-not (Get-LocalGroupMember -Group "Administrators" -Member "Nadeem" -ErrorAction SilentlyContinue)) {
+              Add-LocalGroupMember -Group "Administrators" -Member "Nadeem"
           }
-          if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member "Nadeem" -ErrorAction SilentlyContinue)) {
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Nadeem"
           }
-          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=User: Nadeem | Password: $password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -82,20 +81,19 @@ jobs:
 
       - name: Force Create Nadeem Profile (best-effort)
         run: |
-          $username = "Nadeem"
-          $userProfile = "C:\Users\$username"
+          $userProfile = "C:\Users\Nadeem"
           if (-not (Test-Path $userProfile)) {
-            Write-Host "$username profile missing — attempting to create from Default..."
+            Write-Host "Nadeem profile missing — attempting to create from Default..."
             Copy-Item -Path "C:\Users\Default" -Destination $userProfile -Recurse -Force -ErrorAction SilentlyContinue
             try {
-              icacls $userProfile /grant "$username:(OI)(CI)F" /T | Out-Null
+              icacls $userProfile /grant "Nadeem:(OI)(CI)F" /T | Out-Null
             } catch {
               Write-Host "icacls failed to set permissions; continuing."
             }
           } else {
-            Write-Host "$username profile already exists."
+            Write-Host "Nadeem profile already exists."
           }
-          $userDesktop = "C:\Users\$username\Desktop"
+          $userDesktop = "C:\Users\Nadeem\Desktop"
           if (-not (Test-Path $userDesktop)) {
             New-Item -ItemType Directory -Path $userDesktop -Force | Out-Null
           }
@@ -124,7 +122,6 @@ jobs:
             if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
             New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
             & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
-            # Find inner folder
             $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
             if (-not $innerFolder) { Write-Error "No folder found in archive."; exit 1 }
             Write-Host "Copying CONTENTS to Public Desktop..."
