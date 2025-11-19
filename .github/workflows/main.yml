@@ -91,15 +91,16 @@ jobs:
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
-          - name: Download and Extract sOFTWARES
-            run: |
-              # Variables
-              $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
-              $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
-              $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
-              $adminDesktop = Join-Path "C:\Users\Administrator" "Desktop"
 
-              try {
+      - name: Download and Extract sOFTWARES
+        run: |
+          # Variables
+          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+          $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
+          $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
+          $adminDesktop = Join-Path "C:\Users\Administrator" "Desktop"
+
+          try {
             # Ensure Administrator desktop exists
             if (-not (Test-Path $adminDesktop)) {
               New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
@@ -154,10 +155,10 @@ jobs:
             Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
 
             Write-Host "sOFTWARES downloaded, extracted, and all contents copied to Administrator Desktop."
-              } catch {
+          } catch {
             Write-Error "Failed to download/extract/copy sOFTWARES to Administrator Desktop: $_"
             exit 1
-              }
+          }
       - name: Maintain RDP Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
