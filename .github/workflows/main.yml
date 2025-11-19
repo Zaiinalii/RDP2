@@ -13,151 +13,169 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
+      #######################################################################
+      # ENABLE RDP + OPEN FIREWALL + DISABLE NLA
+      #######################################################################
       - name: Configure Core RDP Settings
         run: |
-          # Enable RDP
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
-          # Disable NLA
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" -Value 0 -Force
-
-          # Lower RDP security to allow external clients
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "SecurityLayer" -Value 0 -Force
-
-          # Allow RDP traffic on port 3389
-          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service -Name TermService -Force
 
-      - name: Create/Modify RDP User (runneradmin)
+      #######################################################################
+      # CREATE ADMINISTRATOR PASSWORD
+      #######################################################################
+      - name: Create RDP Administrator User
         run: |
           $password = 'Zain.rty123'
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Update password for GitHub's default Windows admin account
-          Set-LocalUser -Name "runneradmin" -Password $securePass
+          # Ensure Administrator exists
+          Set-LocalUser -Name "Administrator" -Password $secure
 
-          # Add user to required groups
-          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+          # Ensure group memberships
+          Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
 
-          echo "RDP_USER=runneradmin" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      - name: Disable RDP Timeouts / Idle Lock / Keep Alive
-        run: |
-          # Disable idle timeout
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-            -Name IdleTimeout -Value 0 -Force
-
-          # Disable disconnect limit
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-            -Name MaxDisconnectTime -Value 0 -Force
-
-          # Disable idle session limit
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-            -Name MaxIdleTime -Value 0 -Force
-
-          # Disable lock screen timeout
-          New-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
-            -Name "InactivityTimeoutSecs" -Value 0 -PropertyType DWord -Force
-
-          # TCP KeepAlive every 5 minutes
-          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
-            -Name KeepAliveTime -Value 300000 -PropertyType DWord -Force
-
-          # RDP Client keepalive
-          New-ItemProperty -Path "HKLM:\Software\Microsoft\Terminal Server Client" `
-            -Name "KeepAliveTimeout" -Value 1 -PropertyType DWord -Force
-
-          # Disable sleep mode
-          powercfg -change -standby-timeout-ac 0
-          powercfg -change -hibernate-timeout-ac 0
-
-      - name: Remove GitHub Auto-Logout Tasks
-        run: |
-          schtasks /Delete /TN "GitHub Actions Idle Timeout" /F 2>$null
-          schtasks /Delete /TN "GitHub Actions Automatic Logout" /F 2>$null
-
+      #######################################################################
+      # INSTALL TAILSCALE
+      #######################################################################
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $out = "$env:TEMP\tailscale.msi"
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Start-Process msiexec.exe -ArgumentList "/i `"$out`" /quiet /norestart" -Wait
+          Remove-Item $out
 
       - name: Establish Tailscale Connection
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
-              --authkey=$authKey `
-              --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=runner-$env:GITHUB_RUN_ID
 
           $tsIP = $null
-          for ($i=0; $i -lt 10; $i++) {
+          for ($i=0; $i -lt 10 -and -not $tsIP; $i++){
             $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            if ($tsIP) { break }
-            Start-Sleep -Seconds 5
+            Start-Sleep 5
           }
 
-          if (-not $tsIP) { throw "No Tailscale IP assigned." }
+          if (-not $tsIP) { throw "Tailscale IP not assigned." }
+
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Availability
+      #######################################################################
+      # VERIFY RDP
+      #######################################################################
+      - name: Verify RDP Accessibility
         run: |
-          $res = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $res.TcpTestSucceeded) { throw "RDP Port 3389 NOT accessible!" }
-          Write-Host "RDP Port 3389 is accessible!"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) { throw "RDP port failed." }
+          Write-Host "RDP port is open."
 
+      #######################################################################
+      # DOWNLOAD, EXTRACT AND COPY SOFTWARES TO DESKTOP
+      #######################################################################
       - name: Download and Extract SOFTWARES
         run: |
-          $downloadUrl  = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = "$env:TEMP\sOFTWARES.rar"
-          $extractPath  = "$env:TEMP\sOFTWARES_extracted"
-          $desktopPath  = Join-Path $env:USERPROFILE "Desktop"
+          $extractPath = "$env:TEMP\sOFTWARES_extracted"
+          $desktopPath = "C:\Users\Administrator\Desktop"
 
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -ErrorAction Stop
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath
 
-          # Install 7zip if missing
+          # Ensure 7zip exists
           if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
-            choco install 7zip -y
+            Write-Host "7-Zip missing. Installing."
+            Invoke-WebRequest "https://www.7-zip.org/a/7z1900-x64.exe" -OutFile "$env:TEMP\7z.exe"
+            Start-Process "$env:TEMP\7z.exe" -ArgumentList "/S" -Wait
           }
 
           $sevenZip = "C:\Program Files\7-Zip\7z.exe"
 
-          # Extract
           if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
           New-Item -ItemType Directory -Path $extractPath | Out-Null
 
           & $sevenZip x $downloadPath "-o$extractPath" -y
 
-          # Move to desktop
-          Get-ChildItem $extractPath | ForEach-Object {
-            $dest = Join-Path $desktopPath $_.Name
-            Copy-Item $_.FullName $dest -Recurse -Force
-          }
+          Copy-Item "$extractPath\*" $desktopPath -Recurse -Force
 
           Remove-Item $downloadPath -Force
           Remove-Item $extractPath -Recurse -Force
 
-      - name: Maintain RDP Session
+      #######################################################################
+      # INSTALL PYTHON 3.13.3 SYSTEM-WIDE
+      #######################################################################
+      - name: Install Python 3.13.3
         run: |
-          Write-Host ""
-          Write-Host "========== RDP DETAILS =========="
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Username:     $env:RDP_USER"
-          Write-Host "Password:     $env:RDP_PASS"
-          Write-Host "================================="
-          Write-Host ""
+          $pythonUrl = "https://www.python.org/ftp/python/3.13.3/python-3.13.3-amd64.exe"
+          $installer = "$env:TEMP\python3133.exe"
 
-          # Keep workflow alive for 6 hours
+          Invoke-WebRequest -Uri $pythonUrl -OutFile $installer
+
+          Start-Process -FilePath $installer -ArgumentList `
+            "/quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_launcher=1" `
+            -Wait
+
+          Remove-Item $installer -Force
+
+          python --version
+
+      #######################################################################
+      # INSTALL VISUAL STUDIO CODE SYSTEM-WIDE
+      #######################################################################
+      - name: Install Visual Studio Code
+        run: |
+          $url = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+          $installer = "$env:TEMP\vscode.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+
+          Start-Process $installer -ArgumentList "/verysilent /suppressmsgboxes /mergetasks=!runcode" -Wait
+
+          Remove-Item $installer -Force
+
+          if (-not (Test-Path "C:\Program Files\Microsoft VS Code\Code.exe")) {
+            throw "VS Code install failed."
+          }
+
+      #######################################################################
+      # CREATE DESKTOP SHORTCUTS
+      #######################################################################
+      - name: Create Shortcuts
+        run: |
+          $desktop = "C:\Users\Administrator\Desktop"
+          $WshShell = New-Object -ComObject WScript.Shell
+
+          # Python shortcut
+          $py = $WshShell.CreateShortcut("$desktop\Python 3.13.3.lnk")
+          $py.TargetPath = "C:\Program Files\Python313\python.exe"
+          $py.Save()
+
+          # VS Code shortcut
+          $vs = $WshShell.CreateShortcut("$desktop\VS Code.lnk")
+          $vs.TargetPath = "C:\Program Files\Microsoft VS Code\Code.exe"
+          $vs.Save()
+
+      #######################################################################
+      # KEEP RUNNER ALIVE FOR RDP
+      #######################################################################
+      - name: Maintain RDP Connection
+        run: |
+          Write-Host "=== RDP ACCESS ==="
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "Username: Administrator"
+          Write-Host "Password: Zain.rty123"
+          Write-Host "=================="
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP session active..."
-            Start-Sleep -Seconds 300
+            Write-Host "[KEEP-ALIVE] $(Get-Date)"
+            Start-Sleep 300
           }
