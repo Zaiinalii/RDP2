@@ -23,56 +23,57 @@ jobs:
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "UserAuthentication" -Value 0 -Force
 
-          # Allow low-security RDP encryption layer
+          # Lower RDP security to allow external clients
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "SecurityLayer" -Value 0 -Force
 
-          # Allow 3389 in firewall
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Allow RDP traffic on port 3389
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Password
+      - name: Create/Modify RDP User (runneradmin)
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Ensure Administrator password updated
-          Set-LocalUser -Name "Administrator" -Password $securePass
+          # Update password for GitHub's default Windows admin account
+          Set-LocalUser -Name "runneradmin" -Password $securePass
 
-          # Ensure admin groups
-          Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
+          # Add user to required groups
+          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
 
+          echo "RDP_USER=runneradmin" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
-      - name: Disable RDP Session Timeout / Idle Lock / Keep Alive
+      - name: Disable RDP Timeouts / Idle Lock / Keep Alive
         run: |
           # Disable idle timeout
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
             -Name IdleTimeout -Value 0 -Force
 
-          # Disable max disconnect time
+          # Disable disconnect limit
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
             -Name MaxDisconnectTime -Value 0 -Force
 
-          # Disable max idle time
+          # Disable idle session limit
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
             -Name MaxIdleTime -Value 0 -Force
 
-          # Disable Winlogon inactivity lock
-          Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
-            -Name "InactivityTimeoutSecs" -Value 0 -Force
+          # Disable lock screen timeout
+          New-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" `
+            -Name "InactivityTimeoutSecs" -Value 0 -PropertyType DWord -Force
 
           # TCP KeepAlive every 5 minutes
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
-            -Name KeepAliveTime -PropertyType DWord -Value 300000 -Force
+            -Name KeepAliveTime -Value 300000 -PropertyType DWord -Force
 
-          # RDP client keepalive
+          # RDP Client keepalive
           New-ItemProperty -Path "HKLM:\Software\Microsoft\Terminal Server Client" `
             -Name "KeepAliveTimeout" -Value 1 -PropertyType DWord -Force
 
-          # Disable sleep & hibernate
+          # Disable sleep mode
           powercfg -change -standby-timeout-ac 0
           powercfg -change -hibernate-timeout-ac 0
 
@@ -94,26 +95,25 @@ jobs:
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
           
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+              --authkey=$authKey `
+              --hostname=gh-runner-$env:GITHUB_RUN_ID
+
           $tsIP = $null
           for ($i=0; $i -lt 10; $i++) {
             $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
             if ($tsIP) { break }
-            Start-Sleep 5
+            Start-Sleep -Seconds 5
           }
-          
+
           if (-not $tsIP) { throw "No Tailscale IP assigned." }
-          
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
+      - name: Verify RDP Availability
         run: |
-          Write-Host "Testing RDP Port 3389 on $env:TAILSCALE_IP"
           $res = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-
-          if (-not $res.TcpTestSucceeded) { throw "RDP not reachable." }
-          Write-Host "RDP port is reachable!"
+          if (-not $res.TcpTestSucceeded) { throw "RDP Port 3389 NOT accessible!" }
+          Write-Host "RDP Port 3389 is accessible!"
 
       - name: Download and Extract SOFTWARES
         run: |
@@ -124,8 +124,11 @@ jobs:
 
           Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -ErrorAction Stop
 
-          # Ensure 7zip exists
-          if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe")) { choco install 7zip -y }
+          # Install 7zip if missing
+          if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
+            choco install 7zip -y
+          }
+
           $sevenZip = "C:\Program Files\7-Zip\7z.exe"
 
           # Extract
@@ -134,24 +137,27 @@ jobs:
 
           & $sevenZip x $downloadPath "-o$extractPath" -y
 
-          # Copy to desktop
+          # Move to desktop
           Get-ChildItem $extractPath | ForEach-Object {
-            $d = Join-Path $desktopPath $_.Name
-            Copy-Item $_.FullName $d -Recurse -Force
+            $dest = Join-Path $desktopPath $_.Name
+            Copy-Item $_.FullName $dest -Recurse -Force
           }
 
           Remove-Item $downloadPath -Force
           Remove-Item $extractPath -Recurse -Force
 
-      - name: Maintain RDP Connection
+      - name: Maintain RDP Session
         run: |
-          Write-Host "`n===== RDP ACCESS ====="
-          Write-Host "IP Address:     $env:TAILSCALE_IP"
-          Write-Host "Username:       Administrator"
-          Write-Host "Password:       $env:RDP_PASS"
-          Write-Host "=========================`n"
+          Write-Host ""
+          Write-Host "========== RDP DETAILS =========="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Username:     $env:RDP_USER"
+          Write-Host "Password:     $env:RDP_PASS"
+          Write-Host "================================="
+          Write-Host ""
 
+          # Keep workflow alive for 6 hours
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP Session Active — Running..."
+            Write-Host "[$(Get-Date)] RDP session active..."
             Start-Sleep -Seconds 300
           }
