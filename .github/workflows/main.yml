@@ -27,20 +27,26 @@ jobs:
           Restart-Service -Name TermService -Force
 
       #######################################################################
-      # CREATE ADMINISTRATOR PASSWORD
+      # CREATE WORKING ADMIN USER FOR RDP
       #######################################################################
-      - name: Create RDP Administrator User
+      - name: Create RDP User
         run: |
-          $password = 'Zain.rty123'
+          $username = "rdpadmin"
+          $password = "Zain.rty123"
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Ensure Administrator exists
-          Set-LocalUser -Name "Administrator" -Password $secure
+          # Create user if not exists
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username -Password $secure -AccountNeverExpires
+          } else {
+            Set-LocalUser -Name $username -Password $secure
+          }
 
-          # Ensure group memberships
-          Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
+          # Add to admin groups
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       #######################################################################
@@ -89,13 +95,11 @@ jobs:
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = "$env:TEMP\sOFTWARES.rar"
           $extractPath = "$env:TEMP\sOFTWARES_extracted"
-          $desktopPath = "C:\Users\Administrator\Desktop"
+          $desktopPath = "C:\Users\rdpadmin\Desktop"
 
           Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath
 
-          # Ensure 7zip exists
           if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
-            Write-Host "7-Zip missing. Installing."
             Invoke-WebRequest "https://www.7-zip.org/a/7z1900-x64.exe" -OutFile "$env:TEMP\7z.exe"
             Start-Process "$env:TEMP\7z.exe" -ArgumentList "/S" -Wait
           }
@@ -113,7 +117,7 @@ jobs:
           Remove-Item $extractPath -Recurse -Force
 
       #######################################################################
-      # INSTALL PYTHON 3.13.3 SYSTEM-WIDE
+      # INSTALL PYTHON 3.13.3
       #######################################################################
       - name: Install Python 3.13.3
         run: |
@@ -131,7 +135,7 @@ jobs:
           python --version
 
       #######################################################################
-      # INSTALL VISUAL STUDIO CODE SYSTEM-WIDE
+      # INSTALL VISUAL STUDIO CODE
       #######################################################################
       - name: Install Visual Studio Code
         run: |
@@ -140,40 +144,35 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $installer
 
           Start-Process $installer -ArgumentList "/verysilent /suppressmsgboxes /mergetasks=!runcode" -Wait
-
           Remove-Item $installer -Force
 
-          if (-not (Test-Path "C:\Program Files\Microsoft VS Code\Code.exe")) {
-            throw "VS Code install failed."
-          }
-
       #######################################################################
-      # CREATE DESKTOP SHORTCUTS
+      # CREATE SHORTCUTS
       #######################################################################
-      - name: Create Shortcuts
+      - name: Create Desktop Shortcuts
         run: |
-          $desktop = "C:\Users\Administrator\Desktop"
+          $desktop = "C:\Users\rdpadmin\Desktop"
           $WshShell = New-Object -ComObject WScript.Shell
 
-          # Python shortcut
+          # Python
           $py = $WshShell.CreateShortcut("$desktop\Python 3.13.3.lnk")
           $py.TargetPath = "C:\Program Files\Python313\python.exe"
           $py.Save()
 
-          # VS Code shortcut
+          # VS Code
           $vs = $WshShell.CreateShortcut("$desktop\VS Code.lnk")
           $vs.TargetPath = "C:\Program Files\Microsoft VS Code\Code.exe"
           $vs.Save()
 
       #######################################################################
-      # KEEP RUNNER ALIVE FOR RDP
+      # KEEP RUNNER ALIVE
       #######################################################################
       - name: Maintain RDP Connection
         run: |
           Write-Host "=== RDP ACCESS ==="
           Write-Host "IP: $env:TAILSCALE_IP"
-          Write-Host "Username: Administrator"
-          Write-Host "Password: Zain.rty123"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host "=================="
           while ($true) {
             Write-Host "[KEEP-ALIVE] $(Get-Date)"
