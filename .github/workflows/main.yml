@@ -13,138 +13,116 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
-      - name: Configure Core RDP Settings
+      - name: Enable RDP + Firewall
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
-      - name: Create RDP User with Fixed Password
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Allow" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service TermService -Force
+
+      - name: Create User Nadeem (Admin + RDP)
         run: |
-          $password = 'Zain.rty123'
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
-              Set-LocalUser -Name "Administrator" -Password $securePass
+          $username = "Nadeem"
+          $password = "Zain.rty123"
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (!(Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username -Password $secure -AccountNeverExpires
           } else {
-              New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
+            Set-LocalUser -Name $username -Password $secure
           }
-          if (-not (Get-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Administrators" -Member "Administrator"
+
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Ensure Nadeem Profile + Desktop Exists
+        run: |
+          $userProfile = "C:\Users\Nadeem"
+          $userDesktop = Join-Path $userProfile "Desktop"
+
+          if (!(Test-Path $userProfile)) {
+            Write-Host "Creating user profile..."
+            Copy-Item -Path "C:\Users\Default" -Destination $userProfile -Recurse -Force
+            icacls $userProfile /grant "Nadeem:(OI)(CI)F" /T | Out-Null
           }
-          if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator"
+
+          if (!(Test-Path $userDesktop)) {
+            New-Item -ItemType Directory -Path $userDesktop -Force | Out-Null
           }
-          echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
+
+          echo "USER_DESKTOP=$userDesktop" >> $env:GITHUB_ENV
+
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-      - name: Establish Tailscale Connection
+          $installer = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer
+          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
+          Remove-Item $installer -Force
+
+      - name: Connect Tailscale
         run: |
-          $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          $auth = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$auth --hostname=gh-$env:GITHUB_RUN_ID
+
+          $ip = $null
+          for ($i=0; $i -lt 10; $i++) {
+            $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            if ($ip) { break }
+            Start-Sleep 5
           }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      - name: Verify RDP Accessibility
+
+          if (-not $ip) { Write-Error "Tailscale failed"; exit 1 }
+
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+
+      - name: Test RDP
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
-      - name: Force Create Administrator Profile (best-effort)
-        run: |
-          $adminProfile = "C:\Users\Administrator"
-          if (-not (Test-Path $adminProfile)) {
-            Write-Host "Administrator profile missing — attempting to create from Default..."
-            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
-            try {
-              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
-            } catch {
-              Write-Host "icacls failed to set permissions; continuing."
-            }
-          } else {
-            Write-Host "Administrator profile already exists."
-          }
-          $adminDesktop = "C:\Users\Administrator\Desktop"
-          if (-not (Test-Path $adminDesktop)) {
-            New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
-          }
-      - name: Download, Extract and Deploy (Contents Only)
-        run: |
-          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
-          $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
-          $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
-          $publicDesktop = "C:\Users\Public\Desktop"
-          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
-          $adminDesktop = "C:\Users\Administrator\Desktop"
-          $adminDesktopExists = Test-Path $adminDesktop
-          try {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
-            $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
-            $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            if (-not $sevenZipExe) {
-              choco install 7zip -y
-              $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            }
-            if (-not $sevenZipExe) {
-              Write-Error "7-Zip not found or failed to install."
-              exit 1
-            }
-            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-            & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
-            # Find inner folder
-            $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
-            if (-not $innerFolder) { Write-Error "No folder found in archive."; exit 1 }
-            Write-Host "Copying CONTENTS to Public Desktop..."
-            Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
-              $dest = Join-Path $publicDesktop $_.Name
-              if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
-            }
-            if ($adminDesktopExists) {
-              Write-Host "Copying CONTENTS to Administrator Desktop..."
-              Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
-                $dest = Join-Path $adminDesktop $_.Name
-                if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
-              }
-            }
-            Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-          } catch {
-            Write-Error "Failed during download/extract/deploy: $_"
+          $res = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $res.TcpTestSucceeded) {
+            Write-Error "RDP Port Failed"
             exit 1
           }
-      - name: Maintain RDP Connection
+
+      - name: Download + Extract + Copy to Nadeem Desktop
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: Administrator"
-          Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "==================`n"
+          $url = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+          $rar = "$env:TEMP\sOFTWARES.rar"
+          $extract = "$env:TEMP\soft_extract"
+          $nadeemDesktop = "$env:USER_DESKTOP"
+
+          Invoke-WebRequest -Uri $url -OutFile $rar -UseBasicParsing
+
+          choco install 7zip -y
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+
+          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+
+          & "$sevenZip" x "$rar" "-o$extract" -y
+
+          $inner = Get-ChildItem $extract | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+
+          Get-ChildItem $inner.FullName | ForEach-Object {
+            $dest = Join-Path $nadeemDesktop $_.Name
+            if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force }
+            else { Copy-Item $_.FullName $dest -Force }
+          }
+
+      - name: Keep RDP Alive
+        run: |
+          Write-Host "====================="
+          Write-Host "RDP Ready"
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "User: $env:RDP_USER"
+          Write-Host "Pass: $env:RDP_PASS"
+          Write-Host "====================="
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active"
-              Start-Sleep -Seconds 300
+            Start-Sleep -Seconds 300
           }
