@@ -27,6 +27,7 @@ jobs:
             dir=in action=allow protocol=TCP localport=3389
           # Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
+
       - name: Create RDP User with Fixed Password
         run: |
           # Use a fixed RDP password as requested
@@ -52,6 +53,18 @@ jobs:
               Write-Error "User creation or update failed"
               exit 1
           }
+
+      - name: Keep Administrator Session Active
+        run: |
+          # Prevent session lock and idle disconnect
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "MaxIdleTime" -Value 0
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "InactivityTimeoutSecs" -Value 0
+          # Prevent monitor from sleeping / system from going into standby
+          powercfg.exe /change monitor-timeout-ac 0
+          powercfg.exe /change standby-timeout-ac 0
+
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -60,6 +73,7 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+
       - name: Establish Tailscale Connection
         run: |
           # Get the Tailscale Auth Key from GitHub Secrets
@@ -80,6 +94,7 @@ jobs:
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
@@ -91,6 +106,7 @@ jobs:
               exit 1
           }
           Write-Host "TCP connectivity successful!"
+
       - name: Download and Extract sOFTWARES
         run: |
           # Variables
@@ -119,7 +135,6 @@ jobs:
             # Extract the RAR (use 7z)
             & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
             # Copy all extracted content (files and folders) to Desktop
-            # Use Get-ChildItem to ensure items are copied individually preserving folder structure
             Get-ChildItem -Path $extractPath -Force | ForEach-Object {
               $dest = Join-Path $desktopPath $_.Name
               if ($_.PSIsContainer) {
@@ -136,6 +151,7 @@ jobs:
             Write-Error "Failed to download/extract/copy sOFTWARES: $_"
             exit 1
           }
+
       - name: Maintain RDP Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
