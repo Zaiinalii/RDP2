@@ -74,22 +74,20 @@ jobs:
           $dest="C:\Users\Administrator\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          # Replace Google Drive link with a direct, publicly accessible OVA link
-          $files=@(
-            @{ Url="https://example.com/Nadeem.ova"; Name="Nadeem.ova" },
-            @{ Url="https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.msi"; Name="VirtualBox.msi" }
-          )
+          # Use gdown for Google Drive OVA, direct link for VirtualBox MSI
+          $ovaId = "YOUR_GOOGLE_DRIVE_FILE_ID"  # Replace with actual ID
+          $ovaPath = Join-Path $dest "Nadeem.ova"
+          python -m gdown "https://drive.google.com/uc?id=$ovaId" -O $ovaPath --fuzzy
 
-          foreach ($f in $files) {
-              $out=Join-Path $dest $f.Name
-              Invoke-WebRequest -Uri $f.Url -OutFile $out -UseBasicParsing
-          }
+          $vboxUrl = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.msi"
+          $vboxPath = Join-Path $dest "VirtualBox.msi"
+          Invoke-WebRequest -Uri $vboxUrl -OutFile $vboxPath
 
       - name: Install VirtualBox
         run: |
           $msi="C:\Users\Administrator\Downloads\VirtualBox.msi"
           Start-Process msiexec.exe -ArgumentList "/i `"$msi`" ALLUSERS=2 /quiet /norestart" -Wait
-          Start-Sleep -Seconds 10  # Ensure installation is complete
+          Start-Sleep -Seconds 10
 
       - name: Import OVA
         run: |
