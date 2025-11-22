@@ -32,7 +32,7 @@ jobs:
           }
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-          echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       - name: Keep Administrator Session Active
         run: |
@@ -78,12 +78,8 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox and OVA Files Using gdown
+      - name: Download VirtualBox + OVA (Direct Export Links)
         run: |
-          # Ensure Python and gdown are installed
-          python -m pip install --upgrade pip
-          pip install gdown --no-cache-dir
-
           $dest = "C:\Users\Administrator\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
@@ -93,13 +89,12 @@ jobs:
           )
 
           foreach ($file in $files) {
-              $url = "https://drive.google.com/uc?id=$($file.Id)"
+              $url = "https://drive.google.com/uc?export=download&id=$($file.Id)"
               $output = Join-Path $dest $file.Name
-              Write-Host "Downloading $($file.Name) to $output ..."
-              python -m gdown $url -O $output --fuzzy
+              Write-Host "Downloading $($file.Name)..."
+              Invoke-WebRequest -Uri $url -OutFile $output -UseBasicParsing
               Write-Host "Downloaded $($file.Name)`n"
           }
-
 
       - name: Install VirtualBox Silently
         run: |
