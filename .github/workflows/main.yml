@@ -53,8 +53,12 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
+          # Use provided Tailnet ID and auth key
+          $tailnetID = "TZwtYNqGVG11CNTRL"
           $authKey = "tskey-auth-ksjHGtKnDy11CNTRL-HnYKpkhDEab7Vwr2tntLabGU4zGZs6BEN"
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$authKey" --hostname="gh-runner-$env:GITHUB_RUN_ID"
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID --advertise-routes=0.0.0.0/0
+          
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -62,10 +66,12 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
+
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
+
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Verify RDP Accessibility
@@ -116,13 +122,8 @@ jobs:
 
           & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
 
-      - name: Enable VRDE (Remote Desktop) on VM
-        run: |
-          $vmName = "NadeemVM"
-          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          & $vboxManage modifyvm $vmName --vrde on
-          & $vboxManage modifyvm $vmName --vrdeport 5000
-          & $vboxManage modifyvm $vmName --vrdemulticon on
+          # Enable VRDE (VirtualBox Remote Desktop)
+          & $vboxManage modifyvm $vmName --vrde on --vrdeport 5000
 
       - name: Start Imported VM Headless
         run: |
@@ -130,7 +131,7 @@ jobs:
           $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
           & $vboxManage startvm $vmName --type headless
 
-      - name: Maintain RDP & VRDE Connection
+      - name: Maintain RDP & VirtualBox VRDE Connection
         run: |
           Write-Host "`n=== RDP & VirtualBox VRDE ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
