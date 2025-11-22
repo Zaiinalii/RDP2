@@ -9,6 +9,7 @@ jobs:
     timeout-minutes: 3600
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v2
 
@@ -20,7 +21,7 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create Administrator User
+      - name: Create RDP User
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -31,9 +32,9 @@ jobs:
           }
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-          "RDP_CREDS=Administrator:$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
 
-      - name: Keep Session Active
+      - name: Keep Administrator Session Active
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
@@ -50,61 +51,85 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Connect Tailscale
+      - name: Establish Tailscale Connection
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
-          for ($i=0; $i -lt 10 -and -not $tsIP; $i++) {
-              Start-Sleep -Seconds 5
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP
+      - name: Verify RDP Accessibility
         run: |
-          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $result.TcpTestSucceeded) { Write-Error "RDP not reachable"; exit 1 }
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox MSI and OVA
+      - name: Download VirtualBox EXE and OVA Files Using gdown
         run: |
           python -m pip install --upgrade pip
           pip install gdown --no-cache-dir
-          $dest="C:\Users\Administrator\Downloads"
+
+          $dest = "C:\Users\Administrator\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          # Use gdown for Google Drive OVA, direct link for VirtualBox MSI
-          $ovaId = "YOUR_GOOGLE_DRIVE_FILE_ID"  # Replace with actual ID
-          $ovaPath = Join-Path $dest "Nadeem.ova"
-          python -m gdown "https://drive.google.com/uc?id=$ovaId" -O $ovaPath --fuzzy
+          $files = @(
+            @{ Id = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"; Name = "Nadeem.ova" },
+            @{ Id = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"; Name = "VirtualBox-7.2.4-170995-Win.exe" }
+          )
 
-          $vboxUrl = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.msi"
-          $vboxPath = Join-Path $dest "VirtualBox.msi"
-          Invoke-WebRequest -Uri $vboxUrl -OutFile $vboxPath
+          foreach ($file in $files) {
+              $url = "https://drive.google.com/uc?id=$($file.Id)"
+              $output = Join-Path $dest $file.Name
+              Write-Host "Downloading $($file.Name) to $output ..."
+              python -m gdown $url -O $output --fuzzy
+              Write-Host "Downloaded $($file.Name)`n"
+          }
 
-      - name: Install VirtualBox
+      - name: Install VirtualBox Silently
         run: |
-          $msi="C:\Users\Administrator\Downloads\VirtualBox.msi"
-          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" ALLUSERS=2 /quiet /norestart" -Wait
-          Start-Sleep -Seconds 10
+          $vbInstaller = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.exe"
+          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
 
-      - name: Import OVA
+      - name: Import OVA into VirtualBox
         run: |
-          $vbox="${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          $ova="C:\Users\Administrator\Downloads\Nadeem.ova"
-          $vm="NadeemVM"
-          if (& $vbox list vms | Select-String $vm) { & $vbox unregistervm $vm --delete }
-          & $vbox import $ova --vsys 0 --vmname $vm
+          $ovaPath = "C:\Users\Administrator\Downloads\Nadeem.ova"
+          $vmName = "NadeemVM"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          
+          if (& $vboxManage list vms | Select-String $vmName) {
+              & $vboxManage unregistervm $vmName --delete
+          }
 
-      - name: Start VM Headless
-        run: |
-          $vbox="${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          & $vbox startvm "NadeemVM" --type headless
+          & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
 
-      - name: Maintain RDP Access
+      - name: Start Imported VM Headless
         run: |
-          Write-Host "RDP IP: $env:TAILSCALE_IP"
+          $vmName = "NadeemVM"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          & $vboxManage startvm $vmName --type headless
+
+      - name: Maintain RDP Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
-          while ($true) { Start-Sleep -Seconds 300 }
+          Write-Host "==================`n"
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
+              Start-Sleep -Seconds 300
+          }
