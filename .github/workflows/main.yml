@@ -51,7 +51,7 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
@@ -75,7 +75,7 @@ jobs:
           if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP connection to RDP port 3389 failed"; exit 1 }
           Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox and OVA Files using gdown
+      - name: Download VirtualBox MSI and OVA Files using gdown
         run: |
           python -m pip install --upgrade pip
           pip install gdown --no-cache-dir
@@ -85,21 +85,24 @@ jobs:
 
           $files = @(
             @{ Id = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"; Name = "Nadeem.ova" },
-            @{ Id = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"; Name = "VirtualBox-7.2.4-170995-Win.exe" }
+            @{ Url = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.msi"; Name = "VirtualBox-7.2.4-170995-Win.msi" }
           )
 
           foreach ($file in $files) {
-              $url = "https://drive.google.com/uc?id=$($file.Id)"
               $output = Join-Path $dest $file.Name
-              Write-Host "Downloading $($file.Name) to $output ..."
-              python -m gdown $url -O $output --fuzzy
+              if ($file.ContainsKey("Id")) {
+                  $url = "https://drive.google.com/uc?id=$($file.Id)"
+                  python -m gdown $url -O $output --fuzzy
+              } else {
+                  Invoke-WebRequest -Uri $file.Url -OutFile $output
+              }
               Write-Host "Downloaded $($file.Name)`n"
           }
 
       - name: Install VirtualBox Silently
         run: |
-          $vbInstaller = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.exe"
-          Start-Process -FilePath $vbInstaller -ArgumentList "-msiparams ALLUSERS=2 /quiet /norestart" -Wait
+          $msiPath = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.msi"
+          Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" ALLUSERS=2 /quiet /norestart" -Wait
 
       - name: Import OVA into VirtualBox
         run: |
@@ -108,8 +111,9 @@ jobs:
           $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
           
           # Remove existing VM if exists
-          & $vboxManage list vms | Select-String $vmName
-          if ($LASTEXITCODE -eq 0) { & $vboxManage unregistervm $vmName --delete }
+          if (& $vboxManage list vms | Select-String $vmName) {
+              & $vboxManage unregistervm $vmName --delete
+          }
 
           # Import OVA
           & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
