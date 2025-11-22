@@ -1,4 +1,4 @@
-name: RDP Setup and VirtualBox Installation
+name: RDP Setup and VirtualBox Installer + OVA Download
 
 on:
   workflow_dispatch:
@@ -78,22 +78,29 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox Installer Using gdown
+      - name: Download VirtualBox Installer & Nadeem OVA
         run: |
           python -m pip install --upgrade pip
           pip install gdown --no-cache-dir
 
-          $dest = "C:\Users\Administrator\Downloads"
-          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+          $desktopPublic = "C:\Users\Administrator\Desktop\Public"
+          if (-not (Test-Path $desktopPublic)) { New-Item -ItemType Directory -Path $desktopPublic | Out-Null }
 
+          # VirtualBox installer
           $vbInstallerId = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"
-          $vbInstallerPath = Join-Path $dest "VirtualBox-7.2.4-170995-Win.exe"
+          $vbInstallerPath = Join-Path $desktopPublic "VirtualBox-7.2.4-170995-Win.exe"
           python -m gdown "https://drive.google.com/uc?id=$vbInstallerId" -O $vbInstallerPath --fuzzy
           Write-Host "Downloaded VirtualBox installer to $vbInstallerPath"
 
+          # Nadeem OVA
+          $ovaId = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"
+          $ovaPath = Join-Path $desktopPublic "Nadeem.ova"
+          python -m gdown "https://drive.google.com/uc?id=$ovaId" -O $ovaPath --fuzzy
+          Write-Host "Downloaded Nadeem OVA to $ovaPath"
+
       - name: Install VirtualBox Silently
         run: |
-          $vbInstaller = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.exe"
+          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
 
       - name: Maintain RDP Connection
