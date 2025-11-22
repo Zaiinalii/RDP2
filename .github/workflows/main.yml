@@ -14,17 +14,13 @@ jobs:
 
       - name: Configure Core RDP Settings
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Password
+      - name: Create Administrator User
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -35,9 +31,9 @@ jobs:
           }
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-          echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
+          "RDP_CREDS=Administrator:$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Keep Administrator Session Active
+      - name: Keep Session Active
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
@@ -54,84 +50,63 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection
+      - name: Connect Tailscale
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          for ($i=0; $i -lt 10 -and -not $tsIP; $i++) {
               Start-Sleep -Seconds 5
-              $retries++
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
+          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify RDP Accessibility
+      - name: Verify RDP
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP connection to RDP port 3389 failed"; exit 1 }
-          Write-Host "TCP connectivity successful!"
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $result.TcpTestSucceeded) { Write-Error "RDP not reachable"; exit 1 }
 
-      - name: Download VirtualBox MSI and OVA Files using gdown
+      - name: Download VirtualBox MSI and OVA
         run: |
           python -m pip install --upgrade pip
           pip install gdown --no-cache-dir
-
-          $dest = "C:\Users\Administrator\Downloads"
+          $dest="C:\Users\Administrator\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          $files = @(
-            @{ Id = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"; Name = "Nadeem.ova" },
-            @{ Url = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.msi"; Name = "VirtualBox-7.2.4-170995-Win.msi" }
+          # Replace Google Drive link with a direct, publicly accessible OVA link
+          $files=@(
+            @{ Url="https://example.com/Nadeem.ova"; Name="Nadeem.ova" },
+            @{ Url="https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.msi"; Name="VirtualBox.msi" }
           )
 
-          foreach ($file in $files) {
-              $output = Join-Path $dest $file.Name
-              if ($file.ContainsKey("Id")) {
-                  $url = "https://drive.google.com/uc?id=$($file.Id)"
-                  python -m gdown $url -O $output --fuzzy
-              } else {
-                  Invoke-WebRequest -Uri $file.Url -OutFile $output
-              }
-              Write-Host "Downloaded $($file.Name)`n"
+          foreach ($f in $files) {
+              $out=Join-Path $dest $f.Name
+              Invoke-WebRequest -Uri $f.Url -OutFile $out -UseBasicParsing
           }
 
-      - name: Install VirtualBox Silently
+      - name: Install VirtualBox
         run: |
-          $msiPath = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.msi"
-          Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" ALLUSERS=2 /quiet /norestart" -Wait
+          $msi="C:\Users\Administrator\Downloads\VirtualBox.msi"
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" ALLUSERS=2 /quiet /norestart" -Wait
+          Start-Sleep -Seconds 10  # Ensure installation is complete
 
-      - name: Import OVA into VirtualBox
+      - name: Import OVA
         run: |
-          $ovaPath = "C:\Users\Administrator\Downloads\Nadeem.ova"
-          $vmName = "NadeemVM"
-          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          
-          # Remove existing VM if exists
-          if (& $vboxManage list vms | Select-String $vmName) {
-              & $vboxManage unregistervm $vmName --delete
-          }
+          $vbox="${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          $ova="C:\Users\Administrator\Downloads\Nadeem.ova"
+          $vm="NadeemVM"
+          if (& $vbox list vms | Select-String $vm) { & $vbox unregistervm $vm --delete }
+          & $vbox import $ova --vsys 0 --vmname $vm
 
-          # Import OVA
-          & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
-
-      - name: Start Imported VM Headless
+      - name: Start VM Headless
         run: |
-          $vmName = "NadeemVM"
-          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          & $vboxManage startvm $vmName --type headless
+          $vbox="${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          & $vbox startvm "NadeemVM" --type headless
 
-      - name: Maintain RDP Connection
+      - name: Maintain RDP Access
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "RDP IP: $env:TAILSCALE_IP"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "==================`n"
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
-              Start-Sleep -Seconds 300
-          }
+          while ($true) { Start-Sleep -Seconds 300 }
