@@ -1,4 +1,4 @@
-name: RDP Setup and VirtualBox VM Deployment
+name: RDP Setup and VirtualBox Installation
 
 on:
   workflow_dispatch:
@@ -78,7 +78,7 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox EXE and OVA Files Using gdown
+      - name: Download VirtualBox Installer Using gdown
         run: |
           python -m pip install --upgrade pip
           pip install gdown --no-cache-dir
@@ -86,18 +86,10 @@ jobs:
           $dest = "C:\Users\Administrator\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          $files = @(
-            @{ Id = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"; Name = "Nadeem.ova" },
-            @{ Id = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"; Name = "VirtualBox-7.2.4-170995-Win.exe" }
-          )
-
-          foreach ($file in $files) {
-              $url = "https://drive.google.com/uc?id=$($file.Id)"
-              $output = Join-Path $dest $file.Name
-              Write-Host "Downloading $($file.Name) to $output ..."
-              python -m gdown $url -O $output --fuzzy
-              Write-Host "Downloaded $($file.Name)`n"
-          }
+          $vbInstallerId = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"
+          $vbInstallerPath = Join-Path $dest "VirtualBox-7.2.4-170995-Win.exe"
+          python -m gdown "https://drive.google.com/uc?id=$vbInstallerId" -O $vbInstallerPath --fuzzy
+          Write-Host "Downloaded VirtualBox installer to $vbInstallerPath"
 
       - name: Install VirtualBox Silently
         run: |
@@ -106,13 +98,12 @@ jobs:
 
       - name: Maintain RDP Connection
         run: |
-          Write-Host "`n=== RDP & VirtualBox VRDE ACCESS ==="
+          Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "VirtualBox VRDE Port: 5000"
           Write-Host "==================`n"
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP & VRDE Active - Use Ctrl+C to terminate"
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
           }
