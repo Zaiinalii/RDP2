@@ -104,34 +104,6 @@ jobs:
           $vbInstaller = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
 
-      - name: Import OVA into VirtualBox
-        run: |
-          $ovaPath = "C:\Users\Administrator\Downloads\Nadeem.ova"
-          $vmName = "NadeemVM"
-          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          
-          if (& $vboxManage list vms | Select-String $vmName) {
-              & $vboxManage unregistervm $vmName --delete
-          }
-
-          & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
-
-      - name: Enable VirtualBox VRDE (Remote Desktop) on VM
-        run: |
-          $vmName = "NadeemVM"
-          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          
-          # Turn on VRDE
-          & $vboxManage modifyvm $vmName --vrde on
-          & $vboxManage modifyvm $vmName --vrdeport 5000
-          & $vboxManage modifyvm $vmName --vrdeauthlibrary null
-
-      - name: Start Imported VM Headless
-        run: |
-          $vmName = "NadeemVM"
-          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
-          & $vboxManage startvm $vmName --type headless
-
       - name: Maintain RDP Connection
         run: |
           Write-Host "`n=== RDP & VirtualBox VRDE ACCESS ==="
