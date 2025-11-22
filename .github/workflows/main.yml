@@ -78,29 +78,32 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox Installer & Nadeem OVA
+      - name: Download VirtualBox and OVA Files Using gdown
         run: |
+          # Ensure Python and gdown are installed
           python -m pip install --upgrade pip
           pip install gdown --no-cache-dir
 
-          $desktopPublic = "C:\Users\Administrator\Desktop\Public"
-          if (-not (Test-Path $desktopPublic)) { New-Item -ItemType Directory -Path $desktopPublic | Out-Null }
+          $dest = "C:\Users\Administrator\Downloads"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          # VirtualBox installer
-          $vbInstallerId = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"
-          $vbInstallerPath = Join-Path $desktopPublic "VirtualBox-7.2.4-170995-Win.exe"
-          python -m gdown "https://drive.google.com/uc?id=$vbInstallerId" -O $vbInstallerPath --fuzzy
-          Write-Host "Downloaded VirtualBox installer to $vbInstallerPath"
+          $files = @(
+            @{ Id = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"; Name = "Nadeem.ova" },
+            @{ Id = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"; Name = "VirtualBox-7.2.4-170995-Win.exe" }
+          )
 
-          # Nadeem OVA
-          $ovaId = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"
-          $ovaPath = Join-Path $desktopPublic "Nadeem.ova"
-          python -m gdown "https://drive.google.com/uc?id=$ovaId" -O $ovaPath --fuzzy
-          Write-Host "Downloaded Nadeem OVA to $ovaPath"
+          foreach ($file in $files) {
+              $url = "https://drive.google.com/uc?id=$($file.Id)"
+              $output = Join-Path $dest $file.Name
+              Write-Host "Downloading $($file.Name) to $output ..."
+              python -m gdown $url -O $output --fuzzy
+              Write-Host "Downloaded $($file.Name)`n"
+          }
+
 
       - name: Install VirtualBox Silently
         run: |
-          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
+          $vbInstaller = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
 
       - name: Maintain RDP Connection
