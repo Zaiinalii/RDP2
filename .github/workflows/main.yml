@@ -116,6 +116,16 @@ jobs:
 
           & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
 
+      - name: Enable VirtualBox VRDE (Remote Desktop) on VM
+        run: |
+          $vmName = "NadeemVM"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          
+          # Turn on VRDE
+          & $vboxManage modifyvm $vmName --vrde on
+          & $vboxManage modifyvm $vmName --vrdeport 5000
+          & $vboxManage modifyvm $vmName --vrdeauthlibrary null
+
       - name: Start Imported VM Headless
         run: |
           $vmName = "NadeemVM"
@@ -124,12 +134,13 @@ jobs:
 
       - name: Maintain RDP Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "`n=== RDP & VirtualBox VRDE ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "VirtualBox VRDE Port: 5000"
           Write-Host "==================`n"
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
+              Write-Host "[$(Get-Date)] RDP & VRDE Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
           }
