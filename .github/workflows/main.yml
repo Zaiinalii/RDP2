@@ -1,67 +1,48 @@
-name: RDP Setup and Software Installation
+name: RDP Setup and VirtualBox VM Deployment
 
 on:
-  workflow_dispatch:  # Trigger manually
+  workflow_dispatch:
 
 jobs:
-  setup-rdp:
+  setup-rdp-and-vm:
     runs-on: windows-latest
-    timeout-minutes: 3600  # Set the maximum job time (6 hours)
+    timeout-minutes: 3600
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v2
 
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
-          # Open firewall for RDP on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
-          # Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Password
         run: |
-          # Use a fixed RDP password as requested
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          # Create the RDP user (if it already exists, update the password)
           if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
-              # Set the password for existing user
               Set-LocalUser -Name "Administrator" -Password $securePass
           } else {
               New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
           }
-          # Ensure group memberships
-          if (-not (Get-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Administrators" -Member "Administrator"
-          }
-          if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator"
-          }
-          # Output the credentials to GitHub environment for later use
+          Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
           echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
-          if (-not (Get-LocalUser -Name "Administrator")) {
-              Write-Error "User creation or update failed"
-              exit 1
-          }
 
       - name: Keep Administrator Session Active
         run: |
-          # Prevent session lock and idle disconnect
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "MaxIdleTime" -Value 0
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "InactivityTimeoutSecs" -Value 0
-          # Prevent monitor from sleeping / system from going into standby
           powercfg.exe /change monitor-timeout-ac 0
           powercfg.exe /change standby-timeout-ac 0
 
@@ -69,19 +50,14 @@ jobs:
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
-          # Get the Tailscale Auth Key from GitHub Secrets
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          
-          # Log in to Tailscale using the provided auth key and set a unique hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
-          # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -89,24 +65,60 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
+          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP connection to RDP port 3389 failed"; exit 1 }
           Write-Host "TCP connectivity successful!"
 
+      - name: Download VirtualBox and OVA Files using gdown
+        run: |
+          python -m pip install --upgrade pip
+          pip install gdown --no-cache-dir
+
+          $dest = "C:\Users\Administrator\Downloads"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+
+          $files = @(
+            @{ Id = "1QWi-H7_IZgrohf4xCRvmOTvFF2SqAUtw"; Name = "Nadeem.ova" },
+            @{ Id = "1TWl--uMIzyEfyvh44hfLYx0n4D3B82XF"; Name = "VirtualBox-7.2.4-170995-Win.exe" }
+          )
+
+          foreach ($file in $files) {
+              $url = "https://drive.google.com/uc?id=$($file.Id)"
+              $output = Join-Path $dest $file.Name
+              Write-Host "Downloading $($file.Name) to $output ..."
+              python -m gdown $url -O $output --fuzzy
+              Write-Host "Downloaded $($file.Name)`n"
+          }
+
+      - name: Install VirtualBox Silently
+        run: |
+          $vbInstaller = "C:\Users\Administrator\Downloads\VirtualBox-7.2.4-170995-Win.exe"
+          Start-Process -FilePath $vbInstaller -ArgumentList "-msiparams ALLUSERS=2 /quiet /norestart" -Wait
+
+      - name: Import OVA into VirtualBox
+        run: |
+          $ovaPath = "C:\Users\Administrator\Downloads\Nadeem.ova"
+          $vmName = "NadeemVM"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          
+          # Remove existing VM if exists
+          & $vboxManage list vms | Select-String $vmName
+          if ($LASTEXITCODE -eq 0) { & $vboxManage unregistervm $vmName --delete }
+
+          # Import OVA
+          & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
+
+      - name: Start Imported VM Headless
+        run: |
+          $vmName = "NadeemVM"
+          $vboxManage = "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe"
+          & $vboxManage startvm $vmName --type headless
 
       - name: Maintain RDP Connection
         run: |
@@ -115,7 +127,6 @@ jobs:
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
-          # Keep runner active indefinitely (or until manually canceled)
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
