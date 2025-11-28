@@ -12,7 +12,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
+      #######################################
       ## HOST RDP SETUP
+      #######################################
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -27,13 +29,16 @@ jobs:
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
           if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
               Set-LocalUser -Name "Administrator" -Password $securePass
           } else {
               New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
           }
+
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
+
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
         shell: powershell
 
@@ -47,7 +52,9 @@ jobs:
           powercfg.exe /change standby-timeout-ac 0
         shell: powershell
 
+      #######################################
       ## TAILSCALE SETUP
+      #######################################
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -62,22 +69,26 @@ jobs:
         run: |
           $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+
           & $tsExe up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          $retries = 0
           $tsIP = $null
-          while (-not $tsIP -and $retries -lt 15) {
-              Start-Sleep -Seconds 5
+          for ($i=0; $i -lt 15; $i++) {
+              Start-Sleep 5
               $tsIP = & $tsExe ip -4
-              $retries++
+              if ($tsIP) { break }
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
+
+          if (-not $tsIP) { Write-Error "NO Tailscale IP detected — failing." ; exit 1 }
+
           $tsIP = $tsIP.Trim()
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP assigned: $tsIP"
         shell: powershell
 
-      ## DOWNLOAD VIRTUALBOX AND OVA
+      #######################################
+      ## DOWNLOAD FILES (VirtualBox + EP + OVA)
+      #######################################
       - name: Download VirtualBox, Extension Pack, and OVA (with progress)
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
@@ -90,72 +101,86 @@ jobs:
           )
 
           foreach ($file in $files) {
-              Write-Host "Downloading $($file.url)..."
-              Start-BitsTransfer -Source $file.url -Destination $file.out -DisplayName "Downloading $($file.out)" -Description "Downloading via BITS" -TransferType Download
+              Write-Host "Downloading: $($file.url)"
+              Start-BitsTransfer -Source $file.url -Destination $file.out -DisplayName "Downloading $($file.out)" -Description "BITS Download"
               Write-Host "Downloaded: $($file.out)"
           }
         shell: powershell
 
+      #######################################
       ## INSTALL VIRTUALBOX
+      #######################################
       - name: Install VirtualBox Silently
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
         shell: powershell
 
-      ## INSTALL EXTENSION PACK
-      - name: Install VirtualBox Extension Pack
+      #######################################
+      ## INSTALL EXTENSION PACK (echo hack)
+      #######################################
+      - name: Install VirtualBox Extension Pack (Auto‑Accept License)
         run: |
-          $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $epPath = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $ep = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
 
-          # Use hacky trick to auto-accept license
-          cmd.exe /c echo y | "$vbManagePath" extpack install --replace "$epPath"
-          if ($LASTEXITCODE -ne 0) { Write-Error "Extension Pack installation failed. Exiting workflow."; exit 1 }
-          Write-Host "Extension Pack installed successfully."
+          Write-Host "Installing Extension Pack with echo‑hack..."
+          cmd.exe /c echo y | "$vbManage" extpack install --replace "$ep"
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Extension Pack FAILED — stopping workflow."
+              exit 1
+          }
+
+          Write-Host "Extension Pack installed OK."
         shell: powershell
 
-      ## IMPORT OVA AND CONFIGURE VRDP
+      #######################################
+      ## IMPORT OVA + VRDP ENABLE
+      #######################################
       - name: Import OVA and Configure VRDP
         run: |
-          $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
+          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $ova = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
           $vmName = "NadeemVM"
           $vrdePort = 3390
 
-          & "$vbManagePath" import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
-          & "$vbManagePath" modifyvm $vmName --vrde on
-          & "$vbManagePath" modifyvm $vmName --vrdeport $vrdePort
-          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0
+          & "$vbManage" import "$ova" --vsys 0 --vmname $vmName --options keepallmacs
+          & "$vbManage" modifyvm $vmName --vrde on
+          & "$vbManage" modifyvm $vmName --vrdeport $vrdePort
+          & "$vbManage" modifyvm $vmName --vrdeaddress "0.0.0.0"
+
           echo "VM_VRDP_PORT=$vrdePort" >> $env:GITHUB_ENV
         shell: powershell
 
+      #######################################
       ## START VM
-      - name: Start the Virtual Machine (VRDP Ready)
+      #######################################
+      - name: Start the VM (VRDP Enabled)
         run: |
-          $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $vmName = "NadeemVM"
-          & "$vbManagePath" startvm $vmName --type headless
-          Start-Sleep -Seconds 10
-          Write-Host "Virtual Machine '$vmName' is running."
+          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          & "$vbManage" startvm "NadeemVM" --type headless
+          Start-Sleep 10
+          Write-Host "VM Started."
         shell: powershell
 
-      ## ACCESS INFO
+      #######################################
+      ## ACCESS INFO + KEEP-ALIVE LOOP
+      #######################################
       - name: Display Access Information and Keepalive
         run: |
           Write-Host "================================================="
-          Write-Host "HOST RDP ACCESS:"
-          Write-Host "Address: $env:TAILSCALE_IP:3389"
+          Write-Host "HOST RDP:"
+          Write-Host "Connect: $env:TAILSCALE_IP:3389"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "-------------------------------------------------"
-          Write-Host "VM VRDP ACCESS:"
-          Write-Host "From inside host RDP session, connect RDP to:"
-          Write-Host "Address: $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
+          Write-Host "VM VRDP:"
+          Write-Host "Connect from host RDP session → $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
           Write-Host "================================================="
-          
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP & VM Active - Press Ctrl+C to terminate"
-              Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date)] Keepalive — Runner Active"
+            Start-Sleep -Seconds 300
           }
         shell: powershell
