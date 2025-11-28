@@ -82,27 +82,30 @@ jobs:
         shell: powershell
 
       ## VIRTUALBOX INSTALLATION AND SETUP
-      - name: Download VirtualBox, OVA, and Extension Pack
+      - name: Download VirtualBox, OVA, and Extension Pack (REVISED)
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
           
-          # Variables for versioning
+          # Variables matched to the 7.2.4 Extension Pack version
           $vbVersion = "7.2.4"
           $buildNumber = "170995"
           $ovaUrl = "YOUR_OVA_DOWNLOAD_URL_HERE" # <<< IMPORTANT: REPLACE WITH YOUR OVA URL
 
-          # 1. VirtualBox Installer
+          # 1. VirtualBox Installer (using official stable link for matching version)
           $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/VirtualBox-$vbVersion-$buildNumber-Win.exe"
+          Write-Host "Downloading Installer from: $vbInstallerUrl"
           Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-Installer.exe"
 
-          # 2. VirtualBox Extension Pack (REQUIRED FOR VRDP)
-          # Using the official verified URL structure
-          $epFilename = "Oracle_VM_VirtualBox_Extension_Pack-$vbVersion.vbox-extpack"
-          $epUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/$epFilename"
+          # 2. VirtualBox Extension Pack (Using custom Cloudflare R2 Link)
+          # NOTE: The file name must match the name in your provided URL
+          $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4 (2).vbox-extpack"
+          $epUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pack/Oracle_VirtualBox_Extension_Pack-7.2.4%20(2).vbox-extpack"
+          Write-Host "Downloading Extension Pack from: $epUrl"
           Invoke-WebRequest -Uri $epUrl -OutFile "$dest\$epFilename"
 
           # 3. OVA Download
+          Write-Host "Downloading OVA..."
           Invoke-WebRequest -Uri $ovaUrl -OutFile "$dest\Nadeem.ova"
           
           Write-Host "All files downloaded to $dest"
@@ -119,7 +122,8 @@ jobs:
       - name: Install VirtualBox Extension Pack (Required for VRDP)
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $epFilename = "Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          # Using the filename with '(2)' from the Cloudflare R2 download
+          $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4 (2).vbox-extpack"
           $epPath = "C:\Users\Administrator\Desktop\Public\$epFilename"
           
           # Install the Extension Pack and automatically accept the license
