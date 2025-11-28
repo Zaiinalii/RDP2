@@ -6,7 +6,7 @@ on:
 jobs:
   setup-rdp-and-vm:
     runs-on: windows-latest
-    timeout-minutes: 3600 # 60 minutes
+    timeout-minutes: 3600
 
     steps:
       - name: Checkout Repository
@@ -23,7 +23,6 @@ jobs:
         shell: powershell
 
       - name: Create RDP User
-        id: create_user
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -80,12 +79,11 @@ jobs:
           Write-Host "Tailscale IP assigned: $tsIP"
         shell: powershell
 
-      ## VIRTUALBOX DOWNLOADS (Split and show progress)
+      ## VIRTUALBOX INSTALLER & EXTENSION PACK
       - name: Download VirtualBox Installer
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
-
           $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe"
           $destFile = "$dest\VirtualBox-Installer.exe"
           Write-Host "Downloading VirtualBox Installer..."
@@ -103,35 +101,37 @@ jobs:
           Write-Host "Downloaded: $destFile"
         shell: powershell
 
-      - name: Download OVA
-        run: |
-          $dest = "C:\Users\Administrator\Desktop\Public"
-          $ovaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova"  # Replace with actual OVA URL
-          $destFile = "$dest\Nadeem.ova"
-          Write-Host "Downloading OVA..."
-          Start-BitsTransfer -Source $ovaUrl -Destination $destFile -Description "OVA Download"
-          Write-Host "Downloaded: $destFile"
-        shell: powershell
-
-      ## INSTALL VIRTUALBOX
       - name: Install VirtualBox Silently
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
         shell: powershell
 
-      - name: Install VirtualBox Extension Pack
+      - name: Install VirtualBox Extension Pack Silently
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $epPath = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          $licenseHash = "56d7c5c6f4a9eabc123456789abcdef123456789abcdef123456789abcdef1234"
+          $licenseHash = "56d7c5c6f4a9eabc123456789abcdef123456789abcdef123456789abcdef1234" # Replace with correct hash
           & "$vbManagePath" extpack install --replace "$epPath" --accept-license=$licenseHash
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Extension Pack installation failed. Exiting workflow."
+              exit 1
+          }
           Write-Host "VirtualBox Extension Pack installed successfully."
         shell: powershell
 
-      ## IMPORT OVA AND CONFIGURE VRDP
+      ## DOWNLOAD AND IMPORT OVA (only if Extension Pack succeeded)
+      - name: Download OVA
+        run: |
+          $dest = "C:\Users\Administrator\Desktop\Public"
+          $ovaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova"
+          $destFile = "$dest\Nadeem.ova"
+          Write-Host "Downloading OVA..."
+          Start-BitsTransfer -Source $ovaUrl -Destination $destFile -Description "OVA Download"
+          Write-Host "Downloaded: $destFile"
+        shell: powershell
+
       - name: Import OVA and Configure VRDP
-        id: vm_setup
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
