@@ -15,7 +15,6 @@ jobs:
       ## HOST RDP SETUP
       - name: Configure Core RDP Settings
         run: |
-          # Enable RDP and relax security for GitHub Actions environment
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
@@ -81,59 +80,68 @@ jobs:
           Write-Host "Tailscale IP assigned: $tsIP"
         shell: powershell
 
-      ## VIRTUALBOX INSTALLATION AND SETUP
-      - name: Download VirtualBox, OVA, and Extension Pack
+      ## VIRTUALBOX DOWNLOADS (Split and show progress)
+      - name: Download VirtualBox Installer
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          # VirtualBox installer
-          $vbVersion = "7.2.4"
-          $buildNumber = "170995"
-          $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/VirtualBox-$vbVersion-$buildNumber-Win.exe"
-          Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-Installer.exe"
-
-          # VirtualBox Extension Pack
-          $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          $epUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/$epFilename"
-          Invoke-WebRequest -Uri $epUrl -OutFile "$dest\$epFilename"
-
-          # OVA (replace with your actual OVA URL)
-          $ovaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova"
-          Invoke-WebRequest -Uri $ovaUrl -OutFile "$dest\Nadeem.ova"
+          $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe"
+          $destFile = "$dest\VirtualBox-Installer.exe"
+          Write-Host "Downloading VirtualBox Installer..."
+          Start-BitsTransfer -Source $vbInstallerUrl -Destination $destFile -Description "VirtualBox Installer Download"
+          Write-Host "Downloaded: $destFile"
         shell: powershell
 
+      - name: Download VirtualBox Extension Pack
+        run: |
+          $dest = "C:\Users\Administrator\Desktop\Public"
+          $epUrl = "https://download.virtualbox.org/virtualbox/7.2.4/Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $destFile = "$dest\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          Write-Host "Downloading VirtualBox Extension Pack..."
+          Start-BitsTransfer -Source $epUrl -Destination $destFile -Description "Extension Pack Download"
+          Write-Host "Downloaded: $destFile"
+        shell: powershell
+
+      - name: Download OVA
+        run: |
+          $dest = "C:\Users\Administrator\Desktop\Public"
+          $ovaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova"  # Replace with actual OVA URL
+          $destFile = "$dest\Nadeem.ova"
+          Write-Host "Downloading OVA..."
+          Start-BitsTransfer -Source $ovaUrl -Destination $destFile -Description "OVA Download"
+          Write-Host "Downloaded: $destFile"
+        shell: powershell
+
+      ## INSTALL VIRTUALBOX
       - name: Install VirtualBox Silently
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
         shell: powershell
 
-      - name: Install VirtualBox Extension Pack (Required for VRDP)
+      - name: Install VirtualBox Extension Pack
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $epPath = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          # Use SHA256 hash from official VirtualBox release notes
           $licenseHash = "56d7c5c6f4a9eabc123456789abcdef123456789abcdef123456789abcdef1234"
           & "$vbManagePath" extpack install --replace "$epPath" --accept-license=$licenseHash
           Write-Host "VirtualBox Extension Pack installed successfully."
         shell: powershell
 
+      ## IMPORT OVA AND CONFIGURE VRDP
       - name: Import OVA and Configure VRDP
         id: vm_setup
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
           $vmName = "NadeemVM"
-          $vrdePort = 3390 # VRDP port
+          $vrdePort = 3390
 
-          # Import OVA
           & "$vbManagePath" import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
-
-          # Configure VRDP
           & "$vbManagePath" modifyvm $vmName --vrde on
           & "$vbManagePath" modifyvm $vmName --vrdeport $vrdePort
-          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0 # listen on all interfaces
+          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0
 
           Write-Host "VRDP enabled on port $vrdePort for $vmName"
           echo "VM_VRDP_PORT=$vrdePort" >> $env:GITHUB_ENV
@@ -143,10 +151,8 @@ jobs:
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $vmName = "NadeemVM"
-
-          # Start VM in headless mode
           & "$vbManagePath" startvm $vmName --type headless
-          Start-Sleep -Seconds 10 
+          Start-Sleep -Seconds 10
           Write-Host "Virtual Machine '$vmName' is running."
         shell: powershell
 
@@ -155,19 +161,15 @@ jobs:
         run: |
           Write-Host "`n================================================="
           Write-Host "=== HOST RDP ACCESS (First Connection to Runner) ==="
-          Write-Host "================================================="
           Write-Host "Address: $env:TAILSCALE_IP:3389"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "-------------------------------------------------"
           Write-Host "=== VM VRDP ACCESS (Second Connection to VM GUI) ==="
-          Write-Host "=================================================="
           Write-Host "From inside the Host RDP Session, connect RDP to:"
           Write-Host "Address: $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
-          Write-Host "This connects directly to the VirtualBox VM desktop."
           Write-Host "=================================================="
 
-          # Keep the job alive
           while ($true) {
               Write-Host "[$(Get-Date)] RDP & VM Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
