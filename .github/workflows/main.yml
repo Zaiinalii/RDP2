@@ -6,7 +6,7 @@ on:
 jobs:
   setup-rdp-and-vm:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 3600 # 60 minutes
 
     steps:
       - name: Checkout Repository
@@ -15,9 +15,8 @@ jobs:
       ## HOST RDP SETUP
       - name: Configure Core RDP Settings
         run: |
-          # Enable RDP connections
+          # Enable RDP and relax security for GitHub Actions environment
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          # Relax security requirements for quick setup
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
@@ -29,13 +28,11 @@ jobs:
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          # Recreate/set password for 'Administrator'
           if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
               Set-LocalUser -Name "Administrator" -Password $securePass
           } else {
               New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
           }
-          # Add to Admin and RDP groups
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
@@ -90,16 +87,22 @@ jobs:
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
           
-          # VirtualBox 7.2.4 Installer
-          $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe"
-          Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-7.2.4-170995-Win.exe"
-
-          # Corresponding Extension Pack (Crucial for VRDP)
-          $epUrl = "https://download.virtualbox.org/virtualbox/7.2.4/Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          Invoke-WebRequest -Uri $epUrl -OutFile "$dest\ExtensionPack.vbox-extpack"
-
-          # OVA Download
+          # Variables for versioning
+          $vbVersion = "7.2.4"
+          $buildNumber = "170995"
           $ovaUrl = "YOUR_OVA_DOWNLOAD_URL_HERE" # <<< IMPORTANT: REPLACE WITH YOUR OVA URL
+
+          # 1. VirtualBox Installer
+          $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/VirtualBox-$vbVersion-$buildNumber-Win.exe"
+          Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-Installer.exe"
+
+          # 2. VirtualBox Extension Pack (REQUIRED FOR VRDP)
+          # Using the official verified URL structure
+          $epFilename = "Oracle_VM_VirtualBox_Extension_Pack-$vbVersion.vbox-extpack"
+          $epUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/$epFilename"
+          Invoke-WebRequest -Uri $epUrl -OutFile "$dest\$epFilename"
+
+          # 3. OVA Download
           Invoke-WebRequest -Uri $ovaUrl -OutFile "$dest\Nadeem.ova"
           
           Write-Host "All files downloaded to $dest"
@@ -109,18 +112,19 @@ jobs:
 
       - name: Install VirtualBox Silently
         run: |
-          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
+          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
         shell: powershell
 
       - name: Install VirtualBox Extension Pack (Required for VRDP)
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $epPath = "C:\Users\Administrator\Desktop\Public\ExtensionPack.vbox-extpack"
+          $epFilename = "Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $epPath = "C:\Users\Administrator\Desktop\Public\$epFilename"
           
           # Install the Extension Pack and automatically accept the license
           & "$vbManagePath" extpack install --replace "$epPath" --accept-license
-          Write-Host "VirtualBox Extension Pack installed."
+          Write-Host "VirtualBox Extension Pack installed successfully."
         shell: powershell
 
       - name: Import OVA and Configure VRDP
@@ -129,16 +133,15 @@ jobs:
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
           $vmName = "NadeemVM"
-          $vrdePort = 3390 # Using 3390 for the VM's RDP, different from host 3389
+          $vrdePort = 3390 # Using 3390 for the VM's RDP console
 
           # Import the OVA to register the VM
           & "$vbManagePath" import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
-          Write-Host "OVA imported as VM: $vmName"
-
-          # Configure VRDP
+          
+          # Configure VRDP (Remote Desktop)
           & "$vbManagePath" modifyvm $vmName --vrde on
           & "$vbManagePath" modifyvm $vmName --vrdeport $vrdePort
-          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0
+          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0 # Listen on all interfaces
           Write-Host "VRDP enabled on port $vrdePort for $vmName"
           echo "VM_VRDP_PORT=$vrdePort" >> $env:GITHUB_ENV
         shell: powershell
@@ -148,29 +151,30 @@ jobs:
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $vmName = "NadeemVM"
 
-          # Start VM in headless mode, which automatically launches the VRDP server
+          # Start VM in headless mode, launching the VRDP server for remote access
           & "$vbManagePath" startvm $vmName --type headless
 
-          # Wait briefly for the VM to boot up and the VRDP service to stabilize
+          # Wait briefly for the VM to start
           Start-Sleep -Seconds 10 
-          Write-Host "Virtual Machine '$vmName' is running in VRDP-ready headless mode."
+          Write-Host "Virtual Machine '$vmName' is running."
         shell: powershell
 
       ## ACCESS INSTRUCTIONS AND KEEPALIVE
       - name: Display Access Information and Maintain RDP Connection
         run: |
           Write-Host "`n================================================="
-          Write-Host "=== HOST RDP ACCESS (To reach the runner desktop) ==="
+          Write-Host "=== HOST RDP ACCESS (First Connection to Runner) ==="
           Write-Host "================================================="
           Write-Host "Address: $env:TAILSCALE_IP:3389"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "-------------------------------------------------"
-          Write-Host "=== VM RDP ACCESS (From inside the host RDP session) ==="
-          Write-Host "========================================================"
-          Write-Host "Connect your RDP client to: $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
+          Write-Host "=== VM VRDP ACCESS (Second Connection to VM GUI) ==="
+          Write-Host "=================================================="
+          Write-Host "From inside the Host RDP Session, connect RDP to:"
+          Write-Host "Address: $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
           Write-Host "This connects directly to the VirtualBox VM desktop."
-          Write-Host "========================================================"
+          Write-Host "=================================================="
           
           # Keep the job running
           while ($true) {
