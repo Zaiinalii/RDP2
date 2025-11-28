@@ -36,7 +36,7 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
         shell: powershell
 
-      - name: Keep Administrator Session Active (Prevent Timeout)
+      - name: Keep Administrator Session Active
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
@@ -57,7 +57,6 @@ jobs:
         shell: powershell
 
       - name: Establish Tailscale Connection and Get IP
-        id: tailscale_connect
         run: |
           $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
@@ -70,35 +69,29 @@ jobs:
               $tsIP = & $tsExe ip -4
               $retries++
           }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned"; exit 1 }
           $tsIP = $tsIP.Trim()
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP assigned: $tsIP"
         shell: powershell
 
-      ## DOWNLOAD AND INSTALL VIRTUALBOX
-      - name: Download VirtualBox Installer
+      ## VIRTUALBOX INSTALLER AND EXTENSION PACK
+      - name: Download VirtualBox Installer & Extension Pack
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
-          $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe"
-          $destFile = "$dest\VirtualBox-Installer.exe"
-          Write-Host "Downloading VirtualBox Installer..."
-          Start-BitsTransfer -Source $vbInstallerUrl -Destination $destFile -Description "VirtualBox Installer Download"
-          Write-Host "Downloaded: $destFile"
-        shell: powershell
 
-      - name: Download VirtualBox Extension Pack
-        run: |
-          $dest = "C:\Users\Administrator\Desktop\Public"
-          $epUrl = "https://download.virtualbox.org/virtualbox/7.2.4/Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          $destFile = "$dest\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $vbVersion = "7.2.4"
+          $buildNumber = "170995"
+
+          $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/VirtualBox-$vbVersion-$buildNumber-Win.exe"
+          $epUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/Oracle_VirtualBox_Extension_Pack-$vbVersion.vbox-extpack"
+
+          Write-Host "Downloading VirtualBox Installer..."
+          Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-Installer.exe" -UseBasicParsing -Verbose
+
           Write-Host "Downloading VirtualBox Extension Pack..."
-          Start-BitsTransfer -Source $epUrl -Destination $destFile -Description "Extension Pack Download"
-          Write-Host "Downloaded: $destFile"
+          Invoke-WebRequest -Uri $epUrl -OutFile "$dest\Oracle_VirtualBox_Extension_Pack-$vbVersion.vbox-extpack" -UseBasicParsing -Verbose
         shell: powershell
 
       - name: Install VirtualBox Silently
@@ -107,71 +100,60 @@ jobs:
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
         shell: powershell
 
-      - name: Hacky Install VirtualBox Extension Pack (Automatic Yes)
+      - name: Install Extension Pack (non-interactive)
         run: |
-          $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $epPath = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          Write-Host "Installing Extension Pack (auto-agree)..."
-          echo y | & "$vbManagePath" extpack install --replace "$epPath"
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Extension Pack installation failed. Exiting workflow."
-              exit 1
-          }
-          Write-Host "VirtualBox Extension Pack installed successfully."
+          $sha256 = (Get-FileHash $epPath -Algorithm SHA256).Hash
+          Write-Host "Installing Extension Pack with SHA256: $sha256"
+          & $vbManage extpack install --replace "$epPath" --accept-license=$sha256
+          if ($LASTEXITCODE -ne 0) { Write-Error "Extension Pack install failed"; exit 1 }
         shell: powershell
 
-      ## DOWNLOAD AND IMPORT OVA
-      - name: Download OVA
+      ## OVA DOWNLOAD & VM SETUP
+      - name: Download OVA (only after Extension Pack success)
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
-          $ovaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova"
-          $destFile = "$dest\Nadeem.ova"
+          $ovaUrl = "${{ secrets.OVA_URL }}"
+          $ovaPath = "$dest\Nadeem.ova"
           Write-Host "Downloading OVA..."
-          Start-BitsTransfer -Source $ovaUrl -Destination $destFile -Description "OVA Download"
-          Write-Host "Downloaded: $destFile"
+          Invoke-WebRequest -Uri $ovaUrl -OutFile $ovaPath -UseBasicParsing -Verbose
         shell: powershell
 
       - name: Import OVA and Configure VRDP
         run: |
-          $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
           $vmName = "NadeemVM"
           $vrdePort = 3390
 
-          & "$vbManagePath" import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
-          & "$vbManagePath" modifyvm $vmName --vrde on
-          & "$vbManagePath" modifyvm $vmName --vrdeport $vrdePort
-          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0
+          Write-Host "Importing OVA..."
+          & $vbManage import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
 
-          Write-Host "VRDP enabled on port $vrdePort for $vmName"
+          Write-Host "Enabling VRDP..."
+          & $vbManage modifyvm $vmName --vrde on
+          & $vbManage modifyvm $vmName --vrdeport $vrdePort
+          & $vbManage modifyvm $vmName --vrdeaddress 0.0.0.0
           echo "VM_VRDP_PORT=$vrdePort" >> $env:GITHUB_ENV
         shell: powershell
 
-      - name: Start the Virtual Machine (VRDP-Ready Headless)
+      - name: Start VM Headless
         run: |
-          $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $vmName = "NadeemVM"
-          & "$vbManagePath" startvm $vmName --type headless
+          & $vbManage startvm $vmName --type headless
           Start-Sleep -Seconds 10
-          Write-Host "Virtual Machine '$vmName' is running."
+          Write-Host "VM '$vmName' is running (VRDP enabled)."
         shell: powershell
 
-      ## ACCESS INFO AND KEEPALIVE
-      - name: Display Access Information and Maintain RDP Connection
+      - name: Display RDP & VM Access Info
         run: |
-          Write-Host "`n================================================="
-          Write-Host "=== HOST RDP ACCESS (First Connection to Runner) ==="
+          Write-Host "`n==== HOST RDP ACCESS ===="
           Write-Host "Address: $env:TAILSCALE_IP:3389"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "-------------------------------------------------"
-          Write-Host "=== VM VRDP ACCESS (Second Connection to VM GUI) ==="
-          Write-Host "From inside the Host RDP Session, connect RDP to:"
+          Write-Host "`n==== VM VRDP ACCESS ===="
           Write-Host "Address: $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
-          Write-Host "=================================================="
-
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP & VM Active - Use Ctrl+C to terminate"
-              Start-Sleep -Seconds 300
-          }
+          Write-Host "Connect from Host RDP session."
+          while ($true) { Start-Sleep -Seconds 300 }
         shell: powershell
