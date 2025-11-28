@@ -90,7 +90,8 @@ jobs:
           # Variables matched to the 7.2.4 Extension Pack version
           $vbVersion = "7.2.4"
           $buildNumber = "170995"
-          $ovaUrl = "YOUR_OVA_DOWNLOAD_URL_HERE" # <<< IMPORTANT: REPLACE WITH YOUR OVA URL
+          # !!! YOU MUST REPLACE THIS URL WITH YOUR ACTUAL OVA FILE LINK !!!
+          $ovaUrl = "https://static.googleusercontent.com/media/www.google.com/en//intl/en/chrome/static/images/chrome-logo.svg" 
 
           # 1. VirtualBox Installer (using official stable link for matching version)
           $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/VirtualBox-$vbVersion-$buildNumber-Win.exe"
@@ -98,21 +99,21 @@ jobs:
           Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-Installer.exe"
 
           # 2. VirtualBox Extension Pack (Using custom Cloudflare R2 Link)
-          # NOTE: The file name must match the name in your provided URL
           $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4 (2).vbox-extpack"
           $epUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pack/Oracle_VirtualBox_Extension_Pack-7.2.4%20(2).vbox-extpack"
           Write-Host "Downloading Extension Pack from: $epUrl"
           Invoke-WebRequest -Uri $epUrl -OutFile "$dest\$epFilename"
 
-          # 3. OVA Download
+          # 3. OVA Download (Ensure you replace the placeholder URL!)
           Write-Host "Downloading OVA..."
           Invoke-WebRequest -Uri $ovaUrl -OutFile "$dest\Nadeem.ova"
           
           Write-Host "All files downloaded to $dest"
         shell: powershell
         env:
-          OVA_URL: YOUR_OVA_DOWNLOAD_URL_HERE # Replace this with the actual URL
-
+          # !!! YOU MUST REPLACE THIS ENVIRONMENT VARIABLE VALUE !!!
+          OVA_URL: REPLACE_THIS_WITH_YOUR_ACTUAL_OVA_LINK_FOR_CONTEXT
+      
       - name: Install VirtualBox Silently
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
@@ -122,7 +123,6 @@ jobs:
       - name: Install VirtualBox Extension Pack (Required for VRDP)
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          # Using the filename with '(2)' from the Cloudflare R2 download
           $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4 (2).vbox-extpack"
           $epPath = "C:\Users\Administrator\Desktop\Public\$epFilename"
           
@@ -139,7 +139,7 @@ jobs:
           $vmName = "NadeemVM"
           $vrdePort = 3390 # Using 3390 for the VM's RDP console
 
-          # Import the OVA to register the VM
+          # Import the OVA to register the VM. NOTE: This will only work if the downloaded file is a valid OVA/OVF!
           & "$vbManagePath" import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
           
           # Configure VRDP (Remote Desktop)
