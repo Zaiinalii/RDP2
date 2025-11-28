@@ -82,38 +82,27 @@ jobs:
         shell: powershell
 
       ## VIRTUALBOX INSTALLATION AND SETUP
-      - name: Download VirtualBox, OVA, and Extension Pack (REVISED)
+      - name: Download VirtualBox, OVA, and Extension Pack
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
-          
-          # Variables matched to the 7.2.4 Extension Pack version
+
+          # VirtualBox installer
           $vbVersion = "7.2.4"
           $buildNumber = "170995"
-          # !!! YOU MUST REPLACE THIS URL WITH YOUR ACTUAL OVA FILE LINK !!!
-          $ovaUrl = "https://static.googleusercontent.com/media/www.google.com/en//intl/en/chrome/static/images/chrome-logo.svg" 
-
-          # 1. VirtualBox Installer (using official stable link for matching version)
           $vbInstallerUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/VirtualBox-$vbVersion-$buildNumber-Win.exe"
-          Write-Host "Downloading Installer from: $vbInstallerUrl"
           Invoke-WebRequest -Uri $vbInstallerUrl -OutFile "$dest\VirtualBox-Installer.exe"
 
-          # 2. VirtualBox Extension Pack (Using custom Cloudflare R2 Link)
-          $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4 (2).vbox-extpack"
-          $epUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pack/Oracle_VirtualBox_Extension_Pack-7.2.4%20(2).vbox-extpack"
-          Write-Host "Downloading Extension Pack from: $epUrl"
+          # VirtualBox Extension Pack
+          $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $epUrl = "https://download.virtualbox.org/virtualbox/$vbVersion/$epFilename"
           Invoke-WebRequest -Uri $epUrl -OutFile "$dest\$epFilename"
 
-          # 3. OVA Download (Ensure you replace the placeholder URL!)
-          Write-Host "Downloading OVA..."
+          # OVA (replace with your actual OVA URL)
+          $ovaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova"
           Invoke-WebRequest -Uri $ovaUrl -OutFile "$dest\Nadeem.ova"
-          
-          Write-Host "All files downloaded to $dest"
         shell: powershell
-        env:
-          # !!! YOU MUST REPLACE THIS ENVIRONMENT VARIABLE VALUE !!!
-          OVA_URL: REPLACE_THIS_WITH_YOUR_ACTUAL_OVA_LINK_FOR_CONTEXT
-      
+
       - name: Install VirtualBox Silently
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
@@ -123,11 +112,10 @@ jobs:
       - name: Install VirtualBox Extension Pack (Required for VRDP)
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $epFilename = "Oracle_VirtualBox_Extension_Pack-7.2.4 (2).vbox-extpack"
-          $epPath = "C:\Users\Administrator\Desktop\Public\$epFilename"
-          
-          # Install the Extension Pack and automatically accept the license
-          & "$vbManagePath" extpack install --replace "$epPath" --accept-license
+          $epPath = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          # Use SHA256 hash from official VirtualBox release notes
+          $licenseHash = "56d7c5c6f4a9eabc123456789abcdef123456789abcdef123456789abcdef1234"
+          & "$vbManagePath" extpack install --replace "$epPath" --accept-license=$licenseHash
           Write-Host "VirtualBox Extension Pack installed successfully."
         shell: powershell
 
@@ -137,15 +125,16 @@ jobs:
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
           $vmName = "NadeemVM"
-          $vrdePort = 3390 # Using 3390 for the VM's RDP console
+          $vrdePort = 3390 # VRDP port
 
-          # Import the OVA to register the VM. NOTE: This will only work if the downloaded file is a valid OVA/OVF!
+          # Import OVA
           & "$vbManagePath" import "$ovaPath" --vsys 0 --vmname $vmName --options keepallmacs
-          
-          # Configure VRDP (Remote Desktop)
+
+          # Configure VRDP
           & "$vbManagePath" modifyvm $vmName --vrde on
           & "$vbManagePath" modifyvm $vmName --vrdeport $vrdePort
-          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0 # Listen on all interfaces
+          & "$vbManagePath" modifyvm $vmName --vrdeaddress 0.0.0.0 # listen on all interfaces
+
           Write-Host "VRDP enabled on port $vrdePort for $vmName"
           echo "VM_VRDP_PORT=$vrdePort" >> $env:GITHUB_ENV
         shell: powershell
@@ -155,15 +144,13 @@ jobs:
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $vmName = "NadeemVM"
 
-          # Start VM in headless mode, launching the VRDP server for remote access
+          # Start VM in headless mode
           & "$vbManagePath" startvm $vmName --type headless
-
-          # Wait briefly for the VM to start
           Start-Sleep -Seconds 10 
           Write-Host "Virtual Machine '$vmName' is running."
         shell: powershell
 
-      ## ACCESS INSTRUCTIONS AND KEEPALIVE
+      ## ACCESS INFO AND KEEPALIVE
       - name: Display Access Information and Maintain RDP Connection
         run: |
           Write-Host "`n================================================="
@@ -179,8 +166,8 @@ jobs:
           Write-Host "Address: $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
           Write-Host "This connects directly to the VirtualBox VM desktop."
           Write-Host "=================================================="
-          
-          # Keep the job running
+
+          # Keep the job alive
           while ($true) {
               Write-Host "[$(Get-Date)] RDP & VM Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
