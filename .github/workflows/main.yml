@@ -79,7 +79,7 @@ jobs:
           Write-Host "Tailscale IP assigned: $tsIP"
         shell: powershell
 
-      ## VIRTUALBOX INSTALLER & EXTENSION PACK
+      ## DOWNLOAD AND INSTALL VIRTUALBOX
       - name: Download VirtualBox Installer
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
@@ -107,12 +107,12 @@ jobs:
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
         shell: powershell
 
-      - name: Install VirtualBox Extension Pack Silently
+      - name: Hacky Install VirtualBox Extension Pack (Automatic Yes)
         run: |
           $vbManagePath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $epPath = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          $licenseHash = "56d7c5c6f4a9eabc123456789abcdef123456789abcdef123456789abcdef1234" # Replace with correct hash
-          & "$vbManagePath" extpack install --replace "$epPath" --accept-license=$licenseHash
+          Write-Host "Installing Extension Pack (auto-agree)..."
+          echo y | & "$vbManagePath" extpack install --replace "$epPath"
           if ($LASTEXITCODE -ne 0) {
               Write-Error "Extension Pack installation failed. Exiting workflow."
               exit 1
@@ -120,7 +120,7 @@ jobs:
           Write-Host "VirtualBox Extension Pack installed successfully."
         shell: powershell
 
-      ## DOWNLOAD AND IMPORT OVA (only if Extension Pack succeeded)
+      ## DOWNLOAD AND IMPORT OVA
       - name: Download OVA
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
