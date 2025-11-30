@@ -8,6 +8,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 3600
 
+    env:
+      # Pinning version 7.2.4 and Build 170995 for stability
+      VBOX_VER: "7.2.4"
+      VBOX_BUILD: "170995" 
+      # Note the new naming convention: "Oracle_VirtualBox_..." (No "_VM_")
+      EXT_PACK_NAME: "Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+
     steps:
       # ==========================================
       # PHASE 1: CHECKOUT REPO & PREP RDP
@@ -56,29 +63,45 @@ jobs:
           $dest = "$env:USERPROFILE\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
-            -OutFile "$dest\VirtualBox-Installer.exe" `
-            -UseBasicParsing
+          # Using explicitly pinned 7.2.4 version
+          $url = "https://download.virtualbox.org/virtualbox/${{ env.VBOX_VER }}/VirtualBox-${{ env.VBOX_VER }}-${{ env.VBOX_BUILD }}-Win.exe"
+          
+          Invoke-WebRequest -Uri $url -OutFile "$dest\VirtualBox-Installer.exe" -UseBasicParsing
 
-      - name: Copy Pre-Verified Extension Pack
+      - name: Download Extension Pack (Fixed)
         run: |
-          # Copy from repository to Downloads folder
-          Copy-Item "$env:GITHUB_WORKSPACE/Oracle VirtualBox Extension Pack.vbox-extpack" "$env:USERPROFILE\Downloads/Oracle VirtualBox Extension Pack.vbox-extpack" -Force
+          $dest = "$env:USERPROFILE\Downloads"
+          
+          # FIX: Download directly from Oracle because the file is not in the repo.
+          # FIX: Use the new 7.2.x naming convention "Oracle_VirtualBox_..."
+          $url = "https://download.virtualbox.org/virtualbox/${{ env.VBOX_VER }}/${{ env.EXT_PACK_NAME }}"
+          $outfile = "$dest\${{ env.EXT_PACK_NAME }}"
+          
+          Write-Host "Downloading Extension Pack from $url"
+          Invoke-WebRequest -Uri $url -OutFile $outfile -UseBasicParsing
+          
+          if (-not (Test-Path $outfile)) { 
+            Write-Error "Download failed. File not found at $outfile"
+            exit 1 
+          }
 
       - name: Install VirtualBox & Extension Pack
         run: |
           $vbInstaller = "$env:USERPROFILE\Downloads\VirtualBox-Installer.exe"
-          $extPack = "$env:USERPROFILE\Downloads/Oracle VirtualBox Extension Pack.vbox-extpack"
+          $extPack = "$env:USERPROFILE\Downloads\${{ env.EXT_PACK_NAME }}"
           $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
 
-          # Install VirtualBox
+          # 1. Install VirtualBox Base
+          Write-Host "Installing VirtualBox Base..."
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
           $env:Path += ";C:\Program Files\Oracle\VirtualBox"
 
-          # Install Extension Pack
+          # 2. Install Extension Pack (Silent Accept)
           if ((Test-Path $VBoxManage) -and (Test-Path $extPack)) {
-              & $VBoxManage extpack install --replace $extPack --accept-license=eb31505e56e9b4d0fbca139104da41ac6f6b98f8e78968bdf01b1f3da3c4f9ae
+              Write-Host "Installing Extension Pack..."
+              # FIX: Use 'echo y' pipe to silently accept the PUEL license
+              $cmd = "echo y | `"$VBoxManage`" extpack install --replace `"$extPack`""
+              Invoke-Expression -Command $cmd
           } else {
               Write-Error "VBoxManage or extension pack file not found."
               exit 1
@@ -133,6 +156,7 @@ jobs:
           & $VBoxManage import "$ovaPath" --vsys 0 --vmname "$vmName" --eula accept
           & $VBoxManage modifyvm "$vmName" --vrde on
           & $VBoxManage modifyvm "$vmName" --vrdeport 33389
+          # Bind to 0.0.0.0 so it listens on the Tailscale interface
           & $VBoxManage modifyvm "$vmName" --vrdeaddress 0.0.0.0
           & $VBoxManage modifyvm "$vmName" --vrdeauthtype null
           & $VBoxManage startvm "$vmName" --type headless
