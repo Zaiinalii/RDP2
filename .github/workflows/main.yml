@@ -9,10 +9,10 @@ jobs:
     timeout-minutes: 3600
 
     env:
-      # Pinning version 7.2.4 and Build 170995 for stability
+      # Pinning version settings
+      # NOTE: Ensure these versions actually exist on download.virtualbox.org
       VBOX_VER: "7.2.4"
       VBOX_BUILD: "170995" 
-      # Note the new naming convention: "Oracle_VirtualBox_..." (No "_VM_")
       EXT_PACK_NAME: "Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
 
     steps:
@@ -63,17 +63,15 @@ jobs:
           $dest = "$env:USERPROFILE\Downloads"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          # Using explicitly pinned 7.2.4 version
           $url = "https://download.virtualbox.org/virtualbox/${{ env.VBOX_VER }}/VirtualBox-${{ env.VBOX_VER }}-${{ env.VBOX_BUILD }}-Win.exe"
           
+          Write-Host "Downloading Base from $url"
           Invoke-WebRequest -Uri $url -OutFile "$dest\VirtualBox-Installer.exe" -UseBasicParsing
 
-      - name: Download Extension Pack (Fixed)
+      - name: Download Extension Pack
         run: |
           $dest = "$env:USERPROFILE\Downloads"
           
-          # FIX: Download directly from Oracle because the file is not in the repo.
-          # FIX: Use the new 7.2.x naming convention "Oracle_VirtualBox_..."
           $url = "https://download.virtualbox.org/virtualbox/${{ env.VBOX_VER }}/${{ env.EXT_PACK_NAME }}"
           $outfile = "$dest\${{ env.EXT_PACK_NAME }}"
           
@@ -99,9 +97,11 @@ jobs:
           # 2. Install Extension Pack (Silent Accept)
           if ((Test-Path $VBoxManage) -and (Test-Path $extPack)) {
               Write-Host "Installing Extension Pack..."
-              # FIX: Use 'echo y' pipe to silently accept the PUEL license
-              $cmd = "echo y | `"$VBoxManage`" extpack install --replace `"$extPack`""
-              Invoke-Expression -Command $cmd
+              
+              # FIX: Use cmd.exe /c to handle the pipe explicitly. 
+              # This bypasses PowerShell's object parsing issues with stdin.
+              cmd.exe /c "echo y | `"$VBoxManage`" extpack install --replace `"$extPack`""
+              
           } else {
               Write-Error "VBoxManage or extension pack file not found."
               exit 1
