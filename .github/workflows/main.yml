@@ -1,4 +1,4 @@
-name: RDP Setup + VBox ExtPack + VRDP Access
+name: RDP Setup + Custom VBox ExtPack + VRDP
 
 on:
   workflow_dispatch:
@@ -14,12 +14,12 @@ jobs:
 
       - name: Configure Core RDP Settings & Firewall
         run: |
-          # 1. Host RDP Access
+          # 1. Host RDP Access (Port 3389)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale-Host" dir=in action=allow protocol=TCP localport=3389
           
-          # 2. VM VRDP Access (Port 33389)
+          # 2. VM VRDP Access (Port 33389 - The "God Mode" View)
           netsh advfirewall firewall add rule name="RDP-Tailscale-VM" dir=in action=allow protocol=TCP localport=33389
           
           Restart-Service -Name TermService -Force
@@ -75,7 +75,7 @@ jobs:
           New-Item -Path "C:\VirtualBoxConfig" -ItemType Directory -Force
           [Environment]::SetEnvironmentVariable("VBOX_USER_HOME", "C:\VirtualBoxConfig", "Machine")
 
-      - name: Download VBox 7.1.4, ExtPack and OVA
+      - name: Download VBox 7.2.4, Custom ExtPack and OVA
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
@@ -86,24 +86,26 @@ jobs:
             -OutFile "$dest\Nadeem.ova" `
             -UseBasicParsing
 
-          Write-Host "Downloading VirtualBox 7.1.4 Installer..."
+          Write-Host "Downloading VirtualBox 7.2.4 Installer..."
+          # Must match the version of the extension pack
           Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.1.4/VirtualBox-7.1.4-165100-Win.exe" `
+            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
             -OutFile "$dest\VirtualBox-Installer.exe" `
             -UseBasicParsing
 
-          Write-Host "Downloading Extension Pack..."
+          Write-Host "Downloading Custom Extension Pack..."
+          # Using the specific R2 link provided
           Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.1.4/Oracle_VM_VirtualBox_Extension_Pack-7.1.4.vbox-extpack" `
+            -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pack/Oracle_VirtualBox_Extension_Pack-7.2.4%20(2).vbox-extpack" `
             -OutFile "$dest\Oracle_ExtPack.vbox-extpack" `
             -UseBasicParsing
 
-      - name: Install VirtualBox & Extension Pack
+      - name: Install VirtualBox & Custom Extension Pack
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
           $extPack = "C:\Users\Administrator\Desktop\Public\Oracle_ExtPack.vbox-extpack"
           
-          Write-Host "Installing VirtualBox..."
+          Write-Host "Installing VirtualBox 7.2.4..."
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
           
           # Add VBox to Path
@@ -111,8 +113,12 @@ jobs:
           
           if (Test-Path "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe") {
              Write-Host "VirtualBox installed. Installing Extension Pack..."
-             # The 'echo y' pipe is required to accept the license agreement non-interactively
+             
+             # The 'echo y' pipe accepts the license agreement automatically
              cmd /c "echo y | VBoxManage extpack install --replace `"$extPack`""
+             
+             # Verify installation
+             VBoxManage list extpacks
           } else {
              Write-Error "VirtualBox installation failed."
              exit 1
@@ -128,13 +134,13 @@ jobs:
           & $VBoxManage import "$ovaPath" --vsys 0 --vmname "$vmName" --eula accept
           
           Write-Host "Enabling VRDP (Remote Display) on Port 33389..."
-          # Enable VRDE (Extension Pack Feature)
+          # 1. Enable VRDE
           & $VBoxManage modifyvm "$vmName" --vrde on
-          # Set Port
+          # 2. Set Port to 33389 (Mapped in firewall earlier)
           & $VBoxManage modifyvm "$vmName" --vrdeport 33389
-          # Set Address (0.0.0.0 allows connection from any interface including Tailscale)
+          # 3. Allow all addresses
           & $VBoxManage modifyvm "$vmName" --vrdeaddress 0.0.0.0
-          # Disable VBox Auth (So you only need the Windows User/Pass)
+          # 4. Disable VBox Auth (So you see the screen immediately)
           & $VBoxManage modifyvm "$vmName" --vrdeauthtype null
           
           Write-Host "Starting VM in Headless Mode..."
@@ -146,16 +152,15 @@ jobs:
       - name: Connection Info
         run: |
           Write-Host "`n=============================================="
-          Write-Host "       VIRTUAL MACHINE ACCESS INSTRUCTIONS"
+          Write-Host "       VRDP CONNECTION DETAILS"
           Write-Host "=============================================="
           Write-Host "Target IP: $env:TAILSCALE_IP"
           Write-Host "Target Port: 33389"
           Write-Host ""
-          Write-Host "HOW TO CONNECT:"
-          Write-Host "1. Open Remote Desktop Connection on your PC."
-          Write-Host "2. Enter Computer: $env:TAILSCALE_IP:33389"
-          Write-Host "3. Click Connect."
-          Write-Host "4. You will see the VM screen immediately (even BIOS/Boot)."
+          Write-Host "INSTRUCTIONS:"
+          Write-Host "1. On your local PC, open Remote Desktop Connection."
+          Write-Host "2. Connect to: $env:TAILSCALE_IP:33389"
+          Write-Host "3. You will see the VM boot screen instantly."
           Write-Host "==============================================`n"
           while ($true) {
               Start-Sleep -Seconds 300
