@@ -1,4 +1,4 @@
-name: RDP + Call Operator Fix + VRDP
+name: RDP + VirtualBox + VRDP + Tailscale
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
 
     steps:
       # ==========================================
-      # PHASE 1: PREP & RDP
+      # PHASE 1: CHECKOUT REPO & PREP RDP
       # ==========================================
       - name: Checkout Repository
         uses: actions/checkout@v2
@@ -43,6 +43,50 @@ jobs:
           powercfg.exe /change monitor-timeout-ac 0
           powercfg.exe /change standby-timeout-ac 0
 
+      # ==========================================
+      # PHASE 2: INSTALL VIRTUALBOX & EXTENSION PACK
+      # ==========================================
+      - name: Set VirtualBox Config Path
+        run: |
+          New-Item -Path "C:\VirtualBoxConfig" -ItemType Directory -Force
+          [Environment]::SetEnvironmentVariable("VBOX_USER_HOME", "C:\VirtualBoxConfig", "Machine")
+
+      - name: Download VirtualBox Installer
+        run: |
+          $dest = "$env:USERPROFILE\Downloads"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+
+          Invoke-WebRequest `
+            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
+            -OutFile "$dest\VirtualBox-Installer.exe" `
+            -UseBasicParsing
+
+      - name: Copy Pre-Verified Extension Pack
+        run: |
+          # Copy from repository to Downloads folder
+          Copy-Item "$env:GITHUB_WORKSPACE/Oracle VirtualBox Extension Pack.vbox-extpack" "$env:USERPROFILE\Downloads/Oracle VirtualBox Extension Pack.vbox-extpack" -Force
+
+      - name: Install VirtualBox & Extension Pack
+        run: |
+          $vbInstaller = "$env:USERPROFILE\Downloads\VirtualBox-Installer.exe"
+          $extPack = "$env:USERPROFILE\Downloads/Oracle VirtualBox Extension Pack.vbox-extpack"
+          $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+
+          # Install VirtualBox
+          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
+          $env:Path += ";C:\Program Files\Oracle\VirtualBox"
+
+          # Install Extension Pack
+          if ((Test-Path $VBoxManage) -and (Test-Path $extPack)) {
+              & $VBoxManage extpack install --replace $extPack --accept-license=eb31505e56e9b4d0fbca139104da41ac6f6b98f8e78968bdf01b1f3da3c4f9ae
+          } else {
+              Write-Error "VBoxManage or extension pack file not found."
+              exit 1
+          }
+
+      # ==========================================
+      # PHASE 3: INSTALL TAILSCALE
+      # ==========================================
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -69,51 +113,7 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       # ==========================================
-      # PHASE 2: VirtualBox Installation
-      # ==========================================
-      - name: Set VirtualBox Config Path
-        run: |
-          New-Item -Path "C:\VirtualBoxConfig" -ItemType Directory -Force
-          [Environment]::SetEnvironmentVariable("VBOX_USER_HOME", "C:\VirtualBoxConfig", "Machine")
-
-      - name: Download VirtualBox & Extension Pack
-        run: |
-          $dest = "$env:USERPROFILE\Downloads"
-          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
-
-          # Download VirtualBox Installer
-          Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
-            -OutFile "$dest\VirtualBox-Installer.exe" `
-            -UseBasicParsing
-
-          # Download Extension Pack from Cloudflare R2
-          curl -L -o "$dest\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack" "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-
-      - name: Install VirtualBox & Extension Pack
-        run: |
-          $vbInstaller = "$env:USERPROFILE\Downloads\VirtualBox-Installer.exe"
-          $extPackDownloaded = "$env:USERPROFILE\Downloads\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          $extPackCorrect = "$env:USERPROFILE\Downloads\Oracle VirtualBox Extension Pack.vbox-extpack"
-          $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-
-          # Install VirtualBox
-          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
-          $env:Path += ";C:\Program Files\Oracle\VirtualBox"
-
-          # Rename extension pack to match internal XML name
-          Rename-Item -Path $extPackDownloaded -NewName $extPackCorrect -Force
-
-          # Install Extension Pack
-          if ((Test-Path $VBoxManage) -and (Test-Path $extPackCorrect)) {
-              & $VBoxManage extpack install --replace $extPackCorrect --accept-license=eb31505e56e9b4d0fbca139104da41ac6f6b98f8e78968bdf01b1f3da3c4f9ae
-          } else {
-              Write-Error "VBoxManage or extension pack file not found."
-              exit 1
-          }
-
-      # ==========================================
-      # PHASE 3: VM Deployment
+      # PHASE 4: DOWNLOAD & IMPORT VM, ENABLE VRDP
       # ==========================================
       - name: Download OVA
         run: |
