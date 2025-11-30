@@ -42,9 +42,10 @@ jobs:
           powercfg.exe /change monitor-timeout-ac 0
           powercfg.exe /change standby-timeout-ac 0
 
+      # FIXED: Removed Markdown syntax from the URL
       - name: Install Tailscale
         run: |
-          $tsUrl = "[https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi](https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi)"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
@@ -77,86 +78,56 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Download VirtualBox and OVA Directly (No Keys)
+      - name: Download VirtualBox and OVA
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
           Write-Host "Downloading OVA..."
           Invoke-WebRequest `
-            -Uri "[https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova](https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova)" `
+            -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova" `
             -OutFile "$dest\Nadeem.ova" `
             -UseBasicParsing
 
           Write-Host "Downloading VirtualBox installer..."
           Invoke-WebRequest `
-            -Uri "[https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe](https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe)" `
+            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
             -OutFile "$dest\VirtualBox-7.2.4-170995-Win.exe" `
             -UseBasicParsing
 
       - name: Install VirtualBox Silently
         run: |
           $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
-          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
+          Write-Host "Installing VirtualBox..."
+          # Installing with drivers enabled
+          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
           
-          # Verify installation path exists
-          if (-not (Test-Path "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe")) {
-            throw "VirtualBox installation failed or path not found."
-          }
-
-      - name: Import and Start OVA as Administrator
-        run: |
-          # --- Configuration ---
-          $VBoxPath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $OVAFile  = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
-          $VMName   = "NadeemVM"
-          $LogPath  = "C:\Windows\Temp\vbox_debug.log"
-          
-          # --- Credential Setup ---
-          # Create credentials for the 'Administrator' user using the password defined in previous steps
-          $password = $env:RDP_CREDS
-          $secPass  = ConvertTo-SecureString $password -AsPlainText -Force
-          $cred     = New-Object System.Management.Automation.PSCredential ("Administrator", $secPass)
-
-          Write-Host "Preparing to execute VBoxManage as user: Administrator"
-
-          # --- Step 1: Import OVA ---
-          # We wrap the command in cmd /c to handle redirection (>) which isn't natively passed by Start-Process
-          # --vsys 0 --eula accept: Auto-accepts license to prevent hanging
-          # --vsys 0 --vmname: Ensures the VM has a predictable name for the start command
-          $importArgs = "/c `"$VBoxPath`" import `"$OVAFile`" --vsys 0 --vmname `"$VMName`" --eula accept > $LogPath 2>&1"
-          
-          Write-Host "Importing OVA... (This may take time)"
-          $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $importArgs -Credential $cred -PassThru -Wait -WindowStyle Hidden
-
-          # Output logs for debugging
-          if (Test-Path $LogPath) { Get-Content $LogPath }
-          if ($proc.ExitCode -ne 0) { 
-            Write-Error "Import failed with exit code $($proc.ExitCode)" 
-            exit $proc.ExitCode
-          }
-
-          # --- Step 2: Enable Nested Virtualization (Optional/Recommended) ---
-          # Attempts to pass hardware virtualization features to the guest (required for performance)
-          $modArgs = "/c `"$VBoxPath`" modifyvm `"$VMName`" --nested-hw-virt on"
-          Start-Process -FilePath "cmd.exe" -ArgumentList $modArgs -Credential $cred -Wait -WindowStyle Hidden
-
-          # --- Step 3: Start VM Headless ---
-          # --type headless: Starts the VM in the background of the Administrator session. 
-          # It will be visible in the GUI when you log in via RDP.
-          $startArgs = "/c `"$VBoxPath`" startvm `"$VMName`" --type headless >> $LogPath 2>&1"
-          
-          Write-Host "Starting VM..."
-          $procStart = Start-Process -FilePath "cmd.exe" -ArgumentList $startArgs -Credential $cred -PassThru -Wait -WindowStyle Hidden
-          
-          if (Test-Path $LogPath) { Get-Content $LogPath -Tail 20 }
-          
-          if ($procStart.ExitCode -eq 0) {
-            Write-Host "SUCCESS: VM '$VMName' started as Administrator."
+          # Add VBox to PATH for this session so we can use VBoxManage
+          $env:Path += ";C:\Program Files\Oracle\VirtualBox"
+          if (Test-Path "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe") {
+            Write-Host "VirtualBox installed successfully."
           } else {
-            Write-Error "VM failed to start. Check logs above."
-            exit $procStart.ExitCode
+            Write-Error "VirtualBox installation failed."
+            exit 1
           }
+
+      - name: Import and Start OVA
+        run: |
+          $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
+          $vmName = "NadeemVM"
+
+          Write-Host "Importing OVA from $ovaPath..."
+          # Import the OVA, naming the VM 'NadeemVM'
+          & $VBoxManage import "$ovaPath" --vsys 0 --vmname "$vmName" --eula accept
+          
+          Write-Host "Starting VM: $vmName..."
+          # Start the VM in headless mode (required for CI environments)
+          & $VBoxManage startvm "$vmName" --type headless
+
+          # Verify it is running
+          Start-Sleep -Seconds 10
+          & $VBoxManage list runningvms
 
       - name: Maintain RDP Connection
         run: |
@@ -166,6 +137,6 @@ jobs:
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
           while ($true) {
-              Write-Host " RDP Active - Use Ctrl+C to terminate"
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
           }
