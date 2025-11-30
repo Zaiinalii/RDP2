@@ -87,22 +87,26 @@ jobs:
             -OutFile "$dest\VirtualBox-Installer.exe" `
             -UseBasicParsing
 
-          # Download Extension Pack from Cloudflare R2 (exact filename)
+          # Download Extension Pack from Cloudflare R2
           curl -L -o "$dest\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack" "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
 
       - name: Install VirtualBox & Extension Pack
         run: |
           $vbInstaller = "$env:USERPROFILE\Downloads\VirtualBox-Installer.exe"
-          $extPack = "$env:USERPROFILE\Downloads\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $extPackDownloaded = "$env:USERPROFILE\Downloads\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+          $extPackCorrect = "$env:USERPROFILE\Downloads\Oracle VirtualBox Extension Pack.vbox-extpack"
           $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
 
           # Install VirtualBox
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
           $env:Path += ";C:\Program Files\Oracle\VirtualBox"
 
-          # Correct Test-Path syntax with parentheses
-          if ((Test-Path $VBoxManage) -and (Test-Path $extPack)) {
-              & $VBoxManage extpack install --replace $extPack --accept-license=eb31505e56e9b4d0fbca139104da41ac6f6b98f8e78968bdf01b1f3da3c4f9ae
+          # Rename extension pack to match internal XML name
+          Rename-Item -Path $extPackDownloaded -NewName $extPackCorrect -Force
+
+          # Install Extension Pack
+          if ((Test-Path $VBoxManage) -and (Test-Path $extPackCorrect)) {
+              & $VBoxManage extpack install --replace $extPackCorrect --accept-license=eb31505e56e9b4d0fbca139104da41ac6f6b98f8e78968bdf01b1f3da3c4f9ae
           } else {
               Write-Error "VBoxManage or extension pack file not found."
               exit 1
