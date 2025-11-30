@@ -1,4 +1,4 @@
-name: RDP Setup and VirtualBox VRDP Access
+name: RDP Setup and VirtualBox Installer + OVA Download
 
 on:
   workflow_dispatch:
@@ -12,9 +12,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
-      #######################################
-      ## HOST RDP SETUP
-      #######################################
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -22,25 +19,19 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
-        shell: powershell
 
       - name: Create RDP User
-        id: create_user
         run: |
           $password = 'Zain.rty123'
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
           if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
               Set-LocalUser -Name "Administrator" -Password $securePass
           } else {
               New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
           }
-
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
-        shell: powershell
 
       - name: Keep Administrator Session Active
         run: |
@@ -50,137 +41,131 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "InactivityTimeoutSecs" -Value 0
           powercfg.exe /change monitor-timeout-ac 0
           powercfg.exe /change standby-timeout-ac 0
-        shell: powershell
 
-      #######################################
-      ## TAILSCALE SETUP
-      #######################################
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $tsUrl = "[https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi](https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi)"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
-        shell: powershell
 
-      - name: Establish Tailscale Connection and Get IP
-        id: tailscale_connect
+      - name: Establish Tailscale Connection
         run: |
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-
-          & $tsExe up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
-
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
-          for ($i=0; $i -lt 15; $i++) {
-              Start-Sleep 5
-              $tsIP = & $tsExe ip -4
-              if ($tsIP) { break }
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-
-          if (-not $tsIP) { Write-Error "NO Tailscale IP detected — failing." ; exit 1 }
-
-          $tsIP = $tsIP.Trim()
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "Tailscale IP assigned: $tsIP"
-        shell: powershell
 
-      #######################################
-      ## DOWNLOAD FILES (VirtualBox + EP + OVA)
-      #######################################
-      - name: Download VirtualBox, Extension Pack, and OVA (with progress)
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Download VirtualBox and OVA Directly (No Keys)
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
-          $files = @(
-              @{url="https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe"; out="$dest\VirtualBox-Installer.exe"},
-              @{url="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pack/Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"; out="$dest\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"},
-              @{url="https://YOUR_OVA_URL_HERE"; out="$dest\Nadeem.ova"}
-          )
+          Write-Host "Downloading OVA..."
+          Invoke-WebRequest `
+            -Uri "[https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova](https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova)" `
+            -OutFile "$dest\Nadeem.ova" `
+            -UseBasicParsing
 
-          foreach ($file in $files) {
-              Write-Host "Downloading: $($file.url)"
-              Start-BitsTransfer -Source $file.url -Destination $file.out -DisplayName "Downloading $($file.out)" -Description "BITS Download"
-              Write-Host "Downloaded: $($file.out)"
-          }
-        shell: powershell
+          Write-Host "Downloading VirtualBox installer..."
+          Invoke-WebRequest `
+            -Uri "[https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe](https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe)" `
+            -OutFile "$dest\VirtualBox-7.2.4-170995-Win.exe" `
+            -UseBasicParsing
 
-      #######################################
-      ## INSTALL VIRTUALBOX
-      #######################################
       - name: Install VirtualBox Silently
         run: |
-          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
+          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
-        shell: powershell
-
-      #######################################
-      ## INSTALL EXTENSION PACK (echo hack)
-      #######################################
-      - name: Install VirtualBox Extension Pack (Auto‑Accept License)
-        run: |
-          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $ep = "C:\Users\Administrator\Desktop\Public\Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-
-          Write-Host "Installing Extension Pack with echo‑hack..."
-          cmd.exe /c echo y | "$vbManage" extpack install --replace "$ep"
-
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Extension Pack FAILED — stopping workflow."
-              exit 1
+          
+          # Verify installation path exists
+          if (-not (Test-Path "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe")) {
+            throw "VirtualBox installation failed or path not found."
           }
 
-          Write-Host "Extension Pack installed OK."
-        shell: powershell
-
-      #######################################
-      ## IMPORT OVA + VRDP ENABLE
-      #######################################
-      - name: Import OVA and Configure VRDP
+      - name: Import and Start OVA as Administrator
         run: |
-          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $ova = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
-          $vmName = "NadeemVM"
-          $vrdePort = 3390
+          # --- Configuration ---
+          $VBoxPath = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+          $OVAFile  = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
+          $VMName   = "NadeemVM"
+          $LogPath  = "C:\Windows\Temp\vbox_debug.log"
+          
+          # --- Credential Setup ---
+          # Create credentials for the 'Administrator' user using the password defined in previous steps
+          $password = $env:RDP_CREDS
+          $secPass  = ConvertTo-SecureString $password -AsPlainText -Force
+          $cred     = New-Object System.Management.Automation.PSCredential ("Administrator", $secPass)
 
-          & "$vbManage" import "$ova" --vsys 0 --vmname $vmName --options keepallmacs
-          & "$vbManage" modifyvm $vmName --vrde on
-          & "$vbManage" modifyvm $vmName --vrdeport $vrdePort
-          & "$vbManage" modifyvm $vmName --vrdeaddress "0.0.0.0"
+          Write-Host "Preparing to execute VBoxManage as user: Administrator"
 
-          echo "VM_VRDP_PORT=$vrdePort" >> $env:GITHUB_ENV
-        shell: powershell
+          # --- Step 1: Import OVA ---
+          # We wrap the command in cmd /c to handle redirection (>) which isn't natively passed by Start-Process
+          # --vsys 0 --eula accept: Auto-accepts license to prevent hanging
+          # --vsys 0 --vmname: Ensures the VM has a predictable name for the start command
+          $importArgs = "/c `"$VBoxPath`" import `"$OVAFile`" --vsys 0 --vmname `"$VMName`" --eula accept > $LogPath 2>&1"
+          
+          Write-Host "Importing OVA... (This may take time)"
+          $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $importArgs -Credential $cred -PassThru -Wait -WindowStyle Hidden
 
-      #######################################
-      ## START VM
-      #######################################
-      - name: Start the VM (VRDP Enabled)
+          # Output logs for debugging
+          if (Test-Path $LogPath) { Get-Content $LogPath }
+          if ($proc.ExitCode -ne 0) { 
+            Write-Error "Import failed with exit code $($proc.ExitCode)" 
+            exit $proc.ExitCode
+          }
+
+          # --- Step 2: Enable Nested Virtualization (Optional/Recommended) ---
+          # Attempts to pass hardware virtualization features to the guest (required for performance)
+          $modArgs = "/c `"$VBoxPath`" modifyvm `"$VMName`" --nested-hw-virt on"
+          Start-Process -FilePath "cmd.exe" -ArgumentList $modArgs -Credential $cred -Wait -WindowStyle Hidden
+
+          # --- Step 3: Start VM Headless ---
+          # --type headless: Starts the VM in the background of the Administrator session. 
+          # It will be visible in the GUI when you log in via RDP.
+          $startArgs = "/c `"$VBoxPath`" startvm `"$VMName`" --type headless >> $LogPath 2>&1"
+          
+          Write-Host "Starting VM..."
+          $procStart = Start-Process -FilePath "cmd.exe" -ArgumentList $startArgs -Credential $cred -PassThru -Wait -WindowStyle Hidden
+          
+          if (Test-Path $LogPath) { Get-Content $LogPath -Tail 20 }
+          
+          if ($procStart.ExitCode -eq 0) {
+            Write-Host "SUCCESS: VM '$VMName' started as Administrator."
+          } else {
+            Write-Error "VM failed to start. Check logs above."
+            exit $procStart.ExitCode
+          }
+
+      - name: Maintain RDP Connection
         run: |
-          $vbManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          & "$vbManage" startvm "NadeemVM" --type headless
-          Start-Sleep 10
-          Write-Host "VM Started."
-        shell: powershell
-
-      #######################################
-      ## ACCESS INFO + KEEP-ALIVE LOOP
-      #######################################
-      - name: Display Access Information and Keepalive
-        run: |
-          Write-Host "================================================="
-          Write-Host "HOST RDP:"
-          Write-Host "Connect: $env:TAILSCALE_IP:3389"
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "-------------------------------------------------"
-          Write-Host "VM VRDP:"
-          Write-Host "Connect from host RDP session → $env:TAILSCALE_IP:$env:VM_VRDP_PORT"
-          Write-Host "================================================="
-
+          Write-Host "==================`n"
           while ($true) {
-            Write-Host "[$(Get-Date)] Keepalive — Runner Active"
-            Start-Sleep -Seconds 300
+              Write-Host " RDP Active - Use Ctrl+C to terminate"
+              Start-Sleep -Seconds 300
           }
-        shell: powershell
