@@ -1,4 +1,4 @@
-name: RDP Setup and VirtualBox Installer + OVA Download
+name: RDP Setup + VBox ExtPack + VRDP Access
 
 on:
   workflow_dispatch:
@@ -12,12 +12,16 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v2
 
-      - name: Configure Core RDP Settings
+      - name: Configure Core RDP Settings & Firewall
         run: |
+          # 1. Host RDP Access
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale-Host" dir=in action=allow protocol=TCP localport=3389
+          
+          # 2. VM VRDP Access (Port 33389)
+          netsh advfirewall firewall add rule name="RDP-Tailscale-VM" dir=in action=allow protocol=TCP localport=33389
+          
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User
@@ -37,12 +41,9 @@ jobs:
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "MaxIdleTime" -Value 0
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "InactivityTimeoutSecs" -Value 0
           powercfg.exe /change monitor-timeout-ac 0
           powercfg.exe /change standby-timeout-ac 0
 
-      # FIXED: Removed Markdown syntax from the URL
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -68,17 +69,13 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
+      - name: Set VirtualBox Global Config Path
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          # Shared config folder so Administrator can see the VM in GUI
+          New-Item -Path "C:\VirtualBoxConfig" -ItemType Directory -Force
+          [Environment]::SetEnvironmentVariable("VBOX_USER_HOME", "C:\VirtualBoxConfig", "Machine")
 
-      - name: Download VirtualBox and OVA
+      - name: Download VBox 7.1.4, ExtPack and OVA
         run: |
           $dest = "C:\Users\Administrator\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
@@ -89,54 +86,77 @@ jobs:
             -OutFile "$dest\Nadeem.ova" `
             -UseBasicParsing
 
-          Write-Host "Downloading VirtualBox installer..."
+          Write-Host "Downloading VirtualBox 7.1.4 Installer..."
           Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
-            -OutFile "$dest\VirtualBox-7.2.4-170995-Win.exe" `
+            -Uri "https://download.virtualbox.org/virtualbox/7.1.4/VirtualBox-7.1.4-165100-Win.exe" `
+            -OutFile "$dest\VirtualBox-Installer.exe" `
             -UseBasicParsing
 
-      - name: Install VirtualBox Silently
+          Write-Host "Downloading Extension Pack..."
+          Invoke-WebRequest `
+            -Uri "https://download.virtualbox.org/virtualbox/7.1.4/Oracle_VM_VirtualBox_Extension_Pack-7.1.4.vbox-extpack" `
+            -OutFile "$dest\Oracle_ExtPack.vbox-extpack" `
+            -UseBasicParsing
+
+      - name: Install VirtualBox & Extension Pack
         run: |
-          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
+          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-Installer.exe"
+          $extPack = "C:\Users\Administrator\Desktop\Public\Oracle_ExtPack.vbox-extpack"
+          
           Write-Host "Installing VirtualBox..."
-          # Installing with drivers enabled
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
           
-          # Add VBox to PATH for this session so we can use VBoxManage
+          # Add VBox to Path
           $env:Path += ";C:\Program Files\Oracle\VirtualBox"
+          
           if (Test-Path "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe") {
-            Write-Host "VirtualBox installed successfully."
+             Write-Host "VirtualBox installed. Installing Extension Pack..."
+             # The 'echo y' pipe is required to accept the license agreement non-interactively
+             cmd /c "echo y | VBoxManage extpack install --replace `"$extPack`""
           } else {
-            Write-Error "VirtualBox installation failed."
-            exit 1
+             Write-Error "VirtualBox installation failed."
+             exit 1
           }
 
-      - name: Import and Start OVA
+      - name: Import and Enable VRDP
         run: |
           $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
           $vmName = "NadeemVM"
 
-          Write-Host "Importing OVA from $ovaPath..."
-          # Import the OVA, naming the VM 'NadeemVM'
+          Write-Host "Importing OVA..."
           & $VBoxManage import "$ovaPath" --vsys 0 --vmname "$vmName" --eula accept
           
-          Write-Host "Starting VM: $vmName..."
-          # Start the VM in headless mode (required for CI environments)
+          Write-Host "Enabling VRDP (Remote Display) on Port 33389..."
+          # Enable VRDE (Extension Pack Feature)
+          & $VBoxManage modifyvm "$vmName" --vrde on
+          # Set Port
+          & $VBoxManage modifyvm "$vmName" --vrdeport 33389
+          # Set Address (0.0.0.0 allows connection from any interface including Tailscale)
+          & $VBoxManage modifyvm "$vmName" --vrdeaddress 0.0.0.0
+          # Disable VBox Auth (So you only need the Windows User/Pass)
+          & $VBoxManage modifyvm "$vmName" --vrdeauthtype null
+          
+          Write-Host "Starting VM in Headless Mode..."
           & $VBoxManage startvm "$vmName" --type headless
 
-          # Verify it is running
           Start-Sleep -Seconds 10
-          & $VBoxManage list runningvms
+          & $VBoxManage showvminfo "$vmName" | Select-String "VRDE"
 
-      - name: Maintain RDP Connection
+      - name: Connection Info
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: Administrator"
-          Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "==================`n"
+          Write-Host "`n=============================================="
+          Write-Host "       VIRTUAL MACHINE ACCESS INSTRUCTIONS"
+          Write-Host "=============================================="
+          Write-Host "Target IP: $env:TAILSCALE_IP"
+          Write-Host "Target Port: 33389"
+          Write-Host ""
+          Write-Host "HOW TO CONNECT:"
+          Write-Host "1. Open Remote Desktop Connection on your PC."
+          Write-Host "2. Enter Computer: $env:TAILSCALE_IP:33389"
+          Write-Host "3. Click Connect."
+          Write-Host "4. You will see the VM screen immediately (even BIOS/Boot)."
+          Write-Host "==============================================`n"
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
           }
