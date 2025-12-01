@@ -2,6 +2,11 @@ name: RDP + Call Operator Fix + VRDP
 
 on:
   workflow_dispatch:
+    inputs:
+      tailscale_key:
+        description: 'Tailscale auth key (reusable). Leave blank to use local .env or env var on runner.'
+        required: false
+        default: ''
 
 jobs:
   setup-rdp-and-vm:
@@ -52,18 +57,35 @@ jobs:
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
+        env:
+          TS_AUTH_KEY: ${{ github.event.inputs.tailscale_key }}  # from workflow input
         run: |
-          # ==============================================================================
-          # YOUR KEY IS HARDCODED BELOW
-          # ==============================================================================
-          $authKey = "tskey-auth-kNZmawcgNd11CNTRL-82s6cQrmdX94c3LmAhdbX9JPcfNdESnUP"
-          # ==============================================================================
-
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
-          Write-Host "Connecting to Tailscale..."
-          # --force-reauth ensures Reusable keys are accepted
-          & $tsPath up --authkey=$authKey --hostname="gh-runner-$env:GITHUB_RUN_ID" --reset --force-reauth --unattended
+          # fallback: allow TS_AUTH_KEY passed via env on runner or local .env file
+          if (-not $env:TS_AUTH_KEY) {
+              $envFile = "$env:GITHUB_WORKSPACE\.env"
+              if (Test-Path $envFile) {
+                  Write-Host "Reading .env fallback for TS_AUTH_KEY"
+                  $lines = Get-Content $envFile
+                  foreach ($l in $lines) {
+                      if ($l -match '^\s*TS_AUTH_KEY\s*=\s*(.+)\s*$') {
+                          $env:TS_AUTH_KEY = $matches[1].Trim()
+                          break
+                      }
+                  }
+              }
+          }
+
+          if (-not $env:TS_AUTH_KEY) {
+              Write-Error "No Tailscale auth key provided. Supply as workflow input or set TS_AUTH_KEY in runner environment or .env file (not committed)."
+              exit 1
+          }
+
+          $authKey = $env:TS_AUTH_KEY
+          # Mask show
+          Write-Host "Using tailscale key with prefix:" + $authKey.Substring(0,5) + "..."
+          & $tsPath up --authkey=$authKey --hostname="gh-runner-$env:GITHUB_RUN_ID" --unattended
 
           # Wait for IP assignment
           $tsIP = $null
