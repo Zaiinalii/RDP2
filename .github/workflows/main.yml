@@ -54,15 +54,15 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           # ==============================================================================
-          # YOUR HARDCODED KEY
+          # YOUR KEY IS HARDCODED BELOW
           # ==============================================================================
-          $authKey = "tskey-auth-k1UGT4N1Ha11CNTRL-aJXN9qw7Ax7ztxknZdByw7mfN6Hnb6E7"
+          $authKey = "tskey-auth-kNZmawcgNd11CNTRL-82s6cQrmdX94c3LmAhdbX9JPcfNdESnUP"
           # ==============================================================================
 
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           Write-Host "Connecting to Tailscale..."
-          # Using --force-reauth to ensure the reusable key is accepted every time
+          # --force-reauth ensures Reusable keys are accepted
           & $tsPath up --authkey=$authKey --hostname="gh-runner-$env:GITHUB_RUN_ID" --reset --force-reauth --unattended
 
           # Wait for IP assignment
@@ -77,7 +77,7 @@ jobs:
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Check if your key is Reusable."
+              Write-Error "Tailscale IP not assigned. If this fails, generate a NEW Reusable key."
               exit 1
           }
           
