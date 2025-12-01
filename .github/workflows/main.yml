@@ -54,15 +54,15 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           # ==============================================================================
-          # PASTE YOUR REUSABLE KEY BELOW IN $authKey
+          # YOUR HARDCODED KEY
           # ==============================================================================
-          $authKey = "tskey-auth-kAr5DmrSLc11CNTRL-otRHwx5f6NfRDxVBcUZ4Nf2P5cpqWjvkK"
+          $authKey = "tskey-auth-k1UGT4N1Ha11CNTRL-aJXN9qw7Ax7ztxknZdByw7mfN6Hnb6E7"
           # ==============================================================================
 
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           Write-Host "Connecting to Tailscale..."
-          # --force-reauth is required for Reusable keys to work repeatedly on new runners
+          # Using --force-reauth to ensure the reusable key is accepted every time
           & $tsPath up --authkey=$authKey --hostname="gh-runner-$env:GITHUB_RUN_ID" --reset --force-reauth --unattended
 
           # Wait for IP assignment
