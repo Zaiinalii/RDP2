@@ -1,20 +1,23 @@
-name: RDP + Call Operator Fix + VRDP
+name: RDP + VirtualBox + VRDP + Tailscale
 
 on:
   workflow_dispatch:
-    inputs:
-      tailscale_key:
-        description: 'Paste Tailscale Auth Key (Ephemeral)'
-        required: true
 
 jobs:
   setup-rdp-and-vm:
     runs-on: windows-latest
     timeout-minutes: 3600
 
+    env:
+      # Pinning version 7.2.4 and Build 170995 for stability
+      VBOX_VER: "7.2.4"
+      VBOX_BUILD: "170995" 
+      # Note the new naming convention: "Oracle_VirtualBox_..." (No "_VM_")
+      EXT_PACK_NAME: "Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
+
     steps:
       # ==========================================
-      # PHASE 1: PREP & RDP
+      # PHASE 1: CHECKOUT REPO & PREP RDP
       # ==========================================
       - name: Checkout Repository
         uses: actions/checkout@v2
@@ -26,6 +29,7 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale-Host" dir=in action=allow protocol=TCP localport=3389
           netsh advfirewall firewall add rule name="RDP-Tailscale-VM" dir=in action=allow protocol=TCP localport=33389
           Restart-Service -Name TermService -Force
+
       - name: Create RDP User
         run: |
           $password = 'Zain.rty123'
@@ -38,12 +42,74 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
+
       - name: Keep Session Active
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fResetBroken" -Value 0
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "IdleTimeout" -Value 0
           powercfg.exe /change monitor-timeout-ac 0
           powercfg.exe /change standby-timeout-ac 0
+
+      # ==========================================
+      # PHASE 2: INSTALL VIRTUALBOX & EXTENSION PACK
+      # ==========================================
+      - name: Set VirtualBox Config Path
+        run: |
+          New-Item -Path "C:\VirtualBoxConfig" -ItemType Directory -Force
+          [Environment]::SetEnvironmentVariable("VBOX_USER_HOME", "C:\VirtualBoxConfig", "Machine")
+
+      - name: Download VirtualBox Installer
+        run: |
+          $dest = "$env:USERPROFILE\Downloads"
+          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+
+          # Using explicitly pinned 7.2.4 version
+          $url = "https://download.virtualbox.org/virtualbox/${{ env.VBOX_VER }}/VirtualBox-${{ env.VBOX_VER }}-${{ env.VBOX_BUILD }}-Win.exe"
+          
+          Invoke-WebRequest -Uri $url -OutFile "$dest\VirtualBox-Installer.exe" -UseBasicParsing
+
+      - name: Download Extension Pack (Fixed)
+        run: |
+          $dest = "$env:USERPROFILE\Downloads"
+          
+          # FIX: Download directly from Oracle because the file is not in the repo.
+          # FIX: Use the new 7.2.x naming convention "Oracle_VirtualBox_..."
+          $url = "https://download.virtualbox.org/virtualbox/${{ env.VBOX_VER }}/${{ env.EXT_PACK_NAME }}"
+          $outfile = "$dest\${{ env.EXT_PACK_NAME }}"
+          
+          Write-Host "Downloading Extension Pack from $url"
+          Invoke-WebRequest -Uri $url -OutFile $outfile -UseBasicParsing
+          
+          if (-not (Test-Path $outfile)) { 
+            Write-Error "Download failed. File not found at $outfile"
+            exit 1 
+          }
+
+      - name: Install VirtualBox & Extension Pack
+        run: |
+          $vbInstaller = "$env:USERPROFILE\Downloads\VirtualBox-Installer.exe"
+          $extPack = "$env:USERPROFILE\Downloads\${{ env.EXT_PACK_NAME }}"
+          $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
+
+          # 1. Install VirtualBox Base
+          Write-Host "Installing VirtualBox Base..."
+          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
+          $env:Path += ";C:\Program Files\Oracle\VirtualBox"
+
+          # 2. Install Extension Pack (Silent Accept)
+          if ((Test-Path $VBoxManage) -and (Test-Path $extPack)) {
+              Write-Host "Installing Extension Pack..."
+              # FIX: Use 'echo y' pipe to silently accept the PUEL license
+              $cmd = "echo y | `"$VBoxManage`" extpack install --replace `"$extPack`""
+              Invoke-Expression -Command $cmd
+          } else {
+              Write-Error "VBoxManage or extension pack file not found."
+              exit 1
+          }
+
+      # ==========================================
+      # PHASE 3: INSTALL TAILSCALE
+      # ==========================================
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -51,95 +117,52 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
+
       - name: Establish Tailscale Connection
         run: |
-          # 1. Grab the key you pasted in the GitHub UI
-          $authKey = "${{ github.event.inputs.tailscale_key }}"
-          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          # 2. Force the connection with reset flags
-          Write-Host "Connecting to Tailscale..."
-          & $tsPath up --authkey=$authKey --hostname="gh-runner-$env:GITHUB_RUN_ID" --reset --force-reauth --unattended
-          # 3. Wait for IP assignment
+          $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 20) {
-              $tsIP = & $tsPath ip -4
-              if ($tsIP) { break }
-              Write-Host "Waiting for Tailscale IP... ($retries/20)"
-              Start-Sleep -Seconds 3
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
               $retries++
           }
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. The Key might be invalid or expired."
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
-          
-          Write-Host "Tailscale Connected! IP: $tsIP"
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
       # ==========================================
-      # PHASE 2: INSTALLATION (VirtualBox & Extension Pack)
-      # ==========================================
-      - name: Set VirtualBox Global Config Path
-        run: |
-          New-Item -Path "C:\VirtualBoxConfig" -ItemType Directory -Force
-          [Environment]::SetEnvironmentVariable("VBOX_USER_HOME", "C:\VirtualBoxConfig", "Machine")
-      - name: Download VirtualBox Installer & Extension Pack
-        run: |
-          $dest = "$env:USERPROFILE\Downloads"
-          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
-          Write-Host "Downloading VirtualBox Installer..."
-          Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
-            -OutFile "$dest\VirtualBox-Installer.exe" `
-            -UseBasicParsing
-          Write-Host "Downloading Extension Pack with exact filename..."
-          curl -L -o "$dest\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack" "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-      - name: Install VirtualBox & Extension Pack
-        run: |
-          $dest = "$env:USERPROFILE\Downloads"
-          $vbInstaller = "$dest\VirtualBox-Installer.exe"
-          $extPack = "$dest\Oracle_VM_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
-          Write-Host "Installing VirtualBox..."
-          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --ignore-reboot --msiparams ALLUSERS=2" -Wait
-          $env:Path += ";C:\Program Files\Oracle\VirtualBox"
-          $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          if (Test-Path $VBoxManage) {
-              Write-Host "VirtualBox installed. Installing Extension Pack..."
-              & $VBoxManage extpack install --replace $extPack --accept-license=56adf0d4f1ba0e3f3372bd3c79d0f8b9
-              Write-Host "Installed Extension Packs:"
-              & $VBoxManage list extpacks
-          } else {
-              Write-Error "VirtualBox installation failed."
-              exit 1
-          }
-      # ==========================================
-      # PHASE 3: VM DEPLOYMENT
+      # PHASE 4: DOWNLOAD & IMPORT VM, ENABLE VRDP
       # ==========================================
       - name: Download OVA
         run: |
           $dest = "$env:USERPROFILE\Downloads"
-          Write-Host "Downloading OVA to $dest..."
           Invoke-WebRequest `
             -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova" `
             -OutFile "$dest\Nadeem.ova" `
             -UseBasicParsing
-      - name: Import and Enable VRDP
+
+      - name: Import VM and Enable VRDP
         run: |
           $VBoxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
           $dest = "$env:USERPROFILE\Downloads"
           $ovaPath = "$dest\Nadeem.ova"
           $vmName = "NadeemVM"
-          Write-Host "Importing OVA..."
+
           & $VBoxManage import "$ovaPath" --vsys 0 --vmname "$vmName" --eula accept
-          Write-Host "Enabling VRDP on Port 33389..."
           & $VBoxManage modifyvm "$vmName" --vrde on
           & $VBoxManage modifyvm "$vmName" --vrdeport 33389
+          # Bind to 0.0.0.0 so it listens on the Tailscale interface
           & $VBoxManage modifyvm "$vmName" --vrdeaddress 0.0.0.0
           & $VBoxManage modifyvm "$vmName" --vrdeauthtype null
-          Write-Host "Starting VM..."
           & $VBoxManage startvm "$vmName" --type headless
           Start-Sleep -Seconds 10
           & $VBoxManage showvminfo "$vmName" | Select-String "VRDE"
+
       - name: Connection Info
         run: |
           Write-Host "`n=============================================="
@@ -147,6 +170,4 @@ jobs:
           Write-Host "=============================================="
           Write-Host "Target: $($env:TAILSCALE_IP):33389"
           Write-Host "==============================================`n"
-          while ($true) {
-              Start-Sleep -Seconds 300
-          }
+          while ($true) { Start-Sleep -Seconds 300 }
