@@ -119,21 +119,30 @@ jobs:
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
+        env:
+          # Replace the value below with your reusable Tailscale key (visible in the workflow)
+          TS_AUTH_KEY: "tskey-auth-kT72pfQXZc11CNTRL-4qNfiHQQ5eUWz3zN2tVtdUzBaMqPRNpY"
         run: |
-          $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $authKey = $env:TS_AUTH_KEY
+          if (-not $authKey) {
+              Write-Error "No Tailscale auth key set in TS_AUTH_KEY"
               exit 1
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Using Tailscale auth key prefix: $($authKey.Substring(0,8))..."
+          & $tsPath up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID --unattended
+           $tsIP = $null
+           $retries = 0
+           while (-not $tsIP -and $retries -lt 10) {
+               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+               Start-Sleep -Seconds 5
+               $retries++
+           }
+           if (-not $tsIP) {
+               Write-Error "Tailscale IP not assigned. Exiting."
+               exit 1
+           }
+           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       # ==========================================
       # PHASE 4: DOWNLOAD & IMPORT VM, ENABLE VRDP
