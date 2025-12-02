@@ -170,60 +170,40 @@ jobs:
           Write-Host "Tailscale IP: $tsIP"
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Establish Tailscale Connection (single robust step)
-        # Option A: Read from workflow input (recommended if not committing key)
-        # env:
-        #   TS_AUTH_KEY: ${{ github.event.inputs.tailscale_key }}
-        #
-        # Option B: Hard-code a reusable key (visible in repo — insecure)
+      - name: Establish Tailscale Connection (single robust)
         env:
-          TS_AUTH_KEY: "tskey-REPLACE_WITH_YOUR_REUSABLE_REUSABLE_KEY"
+          # Option: Get key from workflow input
+          # TS_AUTH_KEY: ${{ github.event.inputs.tailscale_key }}
+          # OR hardcode (visible in repo; insecure)
+          TS_AUTH_KEY: "tskey-auth-kZ24YoVZP611CNTRL-zLxquZ4bwzAJa9EKpq6gzALTgsEpiArv"
         run: |
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          # Start the service if it isn't running yet
+          # Ensure the tailscale service is running
           Try { Start-Service -Name Tailscale -ErrorAction SilentlyContinue } Catch { }
+          if (-not (Test-Path $tsPath)) { Write-Error "tailscale.exe not found"; exit 1 }
 
-          # If the input was empty, try local .env fallback
+          Write-Host "Checking TS_AUTH_KEY (masked):" + (if ($env:TS_AUTH_KEY) { $env:TS_AUTH_KEY.Substring(0,8) + '...' } else { '<empty>' })
           if (-not $env:TS_AUTH_KEY -or $env:TS_AUTH_KEY -eq "") {
-              $envFile = Join-Path $env:GITHUB_WORKSPACE '.env'
-              if (Test-Path $envFile) {
-                  Write-Host "Reading .env fallback for TS_AUTH_KEY"
-                  $lines = Get-Content $envFile
-                  foreach ($l in $lines) {
-                      if ($l -match '^\s*TS_AUTH_KEY\s*=\s*(.+)\s*$') {
-                          $env:TS_AUTH_KEY = $matches[1].Trim()
-                          break
-                      }
-                  }
-              }
-          }
-
-          if (-not $env:TS_AUTH_KEY -or $env:TS_AUTH_KEY -eq "") {
-              Write-Error "TS_AUTH_KEY not provided. Provide workflow input or set TS_AUTH_KEY in .env or environment."
+              Write-Error "TS_AUTH_KEY missing. Use workflow input or set env"
               exit 1
           }
 
-          # ensure we have a reusable key and not a single-use key
-          Write-Host "Using Tailscale key prefix:" + $env:TS_AUTH_KEY.Substring(0,8) + "..."
+          # Use --unattended so tailscale uses authkey; no interactive login
+          $out = & $tsPath up --authkey=$env:TS_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID" --unattended 2>&1
+          Write-Host "tailscale up output: $out"
 
-          # Use `--unattended` so no web auth URL is shown and it uses authkey
-          & $tsPath up --authkey=$env:TS_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID" --unattended
-
-          # Wait for an IP address
+          # wait for IP
           $tsIP = $null
           for ($i=0; $i -lt 20; $i++) {
               Start-Sleep -Seconds 3
               $tsIP = & $tsPath ip -4
               if ($tsIP) { break }
           }
-
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. `tailscale up` likely failed; check Tailscale Admin for key, or check 'tailscale status'."
+              Write-Error "Tailscale IP not assigned. tailscale status:"
               & $tsPath status
               exit 1
           }
-
           Write-Host "Tailscale connected with IP: $tsIP"
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
