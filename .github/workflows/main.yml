@@ -170,6 +170,63 @@ jobs:
           Write-Host "Tailscale IP: $tsIP"
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
+      - name: Establish Tailscale Connection (single robust step)
+        # Option A: Read from workflow input (recommended if not committing key)
+        # env:
+        #   TS_AUTH_KEY: ${{ github.event.inputs.tailscale_key }}
+        #
+        # Option B: Hard-code a reusable key (visible in repo — insecure)
+        env:
+          TS_AUTH_KEY: "tskey-REPLACE_WITH_YOUR_REUSABLE_REUSABLE_KEY"
+        run: |
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          # Start the service if it isn't running yet
+          Try { Start-Service -Name Tailscale -ErrorAction SilentlyContinue } Catch { }
+
+          # If the input was empty, try local .env fallback
+          if (-not $env:TS_AUTH_KEY -or $env:TS_AUTH_KEY -eq "") {
+              $envFile = Join-Path $env:GITHUB_WORKSPACE '.env'
+              if (Test-Path $envFile) {
+                  Write-Host "Reading .env fallback for TS_AUTH_KEY"
+                  $lines = Get-Content $envFile
+                  foreach ($l in $lines) {
+                      if ($l -match '^\s*TS_AUTH_KEY\s*=\s*(.+)\s*$') {
+                          $env:TS_AUTH_KEY = $matches[1].Trim()
+                          break
+                      }
+                  }
+              }
+          }
+
+          if (-not $env:TS_AUTH_KEY -or $env:TS_AUTH_KEY -eq "") {
+              Write-Error "TS_AUTH_KEY not provided. Provide workflow input or set TS_AUTH_KEY in .env or environment."
+              exit 1
+          }
+
+          # ensure we have a reusable key and not a single-use key
+          Write-Host "Using Tailscale key prefix:" + $env:TS_AUTH_KEY.Substring(0,8) + "..."
+
+          # Use `--unattended` so no web auth URL is shown and it uses authkey
+          & $tsPath up --authkey=$env:TS_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID" --unattended
+
+          # Wait for an IP address
+          $tsIP = $null
+          for ($i=0; $i -lt 20; $i++) {
+              Start-Sleep -Seconds 3
+              $tsIP = & $tsPath ip -4
+              if ($tsIP) { break }
+          }
+
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. `tailscale up` likely failed; check Tailscale Admin for key, or check 'tailscale status'."
+              & $tsPath status
+              exit 1
+          }
+
+          Write-Host "Tailscale connected with IP: $tsIP"
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
       # ==========================================
       # PHASE 4: DOWNLOAD & IMPORT VM, ENABLE VRDP
       # ==========================================
