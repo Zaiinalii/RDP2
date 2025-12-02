@@ -2,6 +2,11 @@ name: RDP + VirtualBox + VRDP + Tailscale
 
 on:
   workflow_dispatch:
+    inputs:
+      tailscale_key:
+        description: 'Tailscale auth key (reusable). Leave blank to use local .env or env var on runner.'
+        required: false
+        default: ''
 
 jobs:
   setup-rdp-and-vm:
@@ -15,6 +20,8 @@ jobs:
       VBOX_BUILD: "170995" 
       EXT_PACK_NAME: "Oracle_VirtualBox_Extension_Pack-7.2.4.vbox-extpack"
 
+      # Provide a fallback empty value (override by workflow input or env var)
+      TS_AUTH_KEY: ${{ github.event.inputs.tailscale_key }}
     steps:
       # ==========================================
       # PHASE 1: CHECKOUT REPO & PREP RDP
