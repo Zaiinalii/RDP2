@@ -135,6 +135,41 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
+      - name: Establish Tailscale Connection (debug)
+        # WARNING: If you hardcode the key here it will be exposed.
+        env:
+          TS_AUTH_KEY: "tskey-auth-kZ24YoVZP611CNTRL-zLxquZ4bwzAJa9EKpq6gzALTgsEpiArv"
+        run: |
+          $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          Write-Host "Tail-scale path: $tsPath"
+          # ensure the service is running
+          Try { Start-Service -Name Tailscale -ErrorAction SilentlyContinue } Catch { }
+          Get-Service -Name Tailscale | Select Name, Status, StartType
+          # print version & status
+          & $tsPath version
+          & $tsPath status
+          if (-not $env:TS_AUTH_KEY) {
+              Write-Error "TS_AUTH_KEY not provided (env). Exiting"
+              exit 1
+          }
+          Write-Host "Running tailscale up (masked key)"
+          & $tsPath up --authkey=$env:TS_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID" --unattended 2>&1 | Tee-Object -Variable out
+          Write-Host "tailscale up output:"
+          $out | ForEach-Object { Write-Host $_ }
+          # wait for IP
+          $tsIP = $null
+          for ($i=0; $i -lt 15 -and -not $tsIP; $i++) {
+              Start-Sleep -Seconds 3
+              $tsIP = & $tsPath ip -4
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. tailscale status:"
+              & $tsPath status
+              exit 1
+          }
+          Write-Host "Tailscale IP: $tsIP"
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
       # ==========================================
       # PHASE 4: DOWNLOAD & IMPORT VM, ENABLE VRDP
       # ==========================================
