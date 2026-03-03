@@ -1,176 +1,3046 @@
-name: Fiverr Scraper (Direct + PIA VPN)
+# ═══════════════════════════════════════════════════════════════════════════════
+# FIVERR SCRAPER - Phase 1 & Phase 2 Combined (FGOS Fleet)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# PHASE 1: Keyword Scraper
+#   - Search keywords on Fiverr
+#   - Extract ALL gig URLs from search results (up to 10 pages per keyword)
+#   - Save to FGOS via fleet API
+#
+# PHASE 2: Gig Details Scraper  
+#   - Visit each gig URL (claimed from FGOS)
+#   - Extract detailed seller info (rating, reviews, price, level, etc.)
+#   - Save to FGOS via fleet API
+#
+# DEFAULT: Runs Phase 1 → Phase 2 automatically
+#
+# ═══════════════════════════════════════════════════════════════════════════════
 
-on:
-  workflow_dispatch:
+# --- AUTO-INSTALL DEPENDENCIES ---
+import sys
+import subprocess
+import importlib
+import time
+import ssl
+import os as _os
 
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours (GitHub hosted runner max)
+# --- FIX SSL CERTIFICATES (OVA Python often missing certs) ---
+try:
+    import certifi
+    _os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+except ImportError:
+    pass
+# Also try to fix via ssl module
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
 
-    env:
-      DISPLAY: ":99"
+# Track installation results
+INSTALL_RESULTS = []
 
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+REQUIREMENTS = {
+    "playwright": "playwright",
+    "requests": "requests",
+    "certifi": "certifi",  # SSL certificates for OVA
+    "camoufox": "camoufox[geoip]",  # With geoip for timezone/locale matching to VPN IP
+    "browserforge": "browserforge",
+}
 
-      # ─── VIRTUAL DISPLAY (needed for PIA installer + browser) ───
-      - name: Start Virtual Display
-        run: |
-          echo "🖥️ Installing and starting Xvfb virtual display..."
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb xauth
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 2
-          echo "✅ Virtual display running on :99"
+# Extras that must be force-installed even if base package exists
+# (camoufox is already installed but [geoip] extra is missing)
+FORCE_INSTALL_EXTRAS = {
+    "camoufox": "camoufox[geoip]",
+}
 
-      # ─── PYTHON SETUP ────────────────────────────────────────────
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+def _pip_install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-      - name: Install Python Dependencies
-        run: |
-          echo "📦 Installing Python dependencies..."
-          pip install --upgrade pip
-          pip install playwright requests certifi "camoufox[geoip]" browserforge
-          
-          echo "🦊 Installing Playwright Firefox..."
-          python -m playwright install firefox
-          python -m playwright install-deps firefox
-          
-          echo "🦊 Fetching Camoufox browser..."
-          python -m camoufox fetch
-          
-          echo "✅ All dependencies installed!"
+def ensure_import(import_name, pip_name=None):
+    try:
+        importlib.import_module(import_name)
+        INSTALL_RESULTS.append(f"✅ {import_name}: already installed")
+        return True
+    except Exception:
+        try:
+            print(f"📦 Installing {pip_name or import_name}...")
+            _pip_install(pip_name or import_name)
+            importlib.invalidate_caches()
+            importlib.import_module(import_name)
+            INSTALL_RESULTS.append(f"✅ {import_name}: installed successfully")
+            return True
+        except Exception as e:
+            INSTALL_RESULTS.append(f"❌ {import_name}: FAILED - {e}")
+            return False
 
-      # ─── PIA VPN SETUP ───────────────────────────────────────────
-      - name: Install PIA VPN
-        run: |
-          echo "🌐 Downloading PIA VPN Linux installer from R2..."
-          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-3.7-08412.run"
-          PIA_INSTALLER="/tmp/pia-install.run"
-          
-          curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
-          
-          FILE_SIZE=$(stat -c%s "$PIA_INSTALLER")
-          echo "📥 Downloaded: $(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB"
-          
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "❌ Download too small ($FILE_SIZE bytes) - likely failed"
-            exit 1
-          fi
-          
-          echo "📦 Installing PIA VPN (official sh method - as normal user)..."
-          chmod +x "$PIA_INSTALLER"
-          
-          # PIA requires running as normal user, NOT root
-          sh "$PIA_INSTALLER" || true
-          
-          # Wait for install + daemon to start
-          sleep 15
-          
-          # Check multiple known install locations
-          PIACTL=""
-          if command -v piactl &>/dev/null; then
-            PIACTL=$(command -v piactl)
-          elif [ -f "/opt/piavpn/bin/piactl" ]; then
-            PIACTL="/opt/piavpn/bin/piactl"
-          elif [ -f "/usr/local/bin/piactl" ]; then
-            PIACTL="/usr/local/bin/piactl"
-          fi
-          
-          if [ -n "$PIACTL" ]; then
-            echo "✅ PIA VPN installed at: $PIACTL"
-            "$PIACTL" --version || true
-            # Check if daemon is running
-            echo "📋 PIA daemon status:"
-            systemctl status piavpn 2>/dev/null || true
-            ps aux | grep -i pia | grep -v grep || true
-          else
-            echo "❌ piactl not found after install. Diagnostics:"
-            echo ""
-            echo "🔍 Searching for piactl..."
-            sudo find / -name "piactl" -type f 2>/dev/null || true
-            echo ""
-            echo "🔍 Searching for pia* binaries..."
-            sudo find /opt /usr/local /usr/bin -name "pia*" 2>/dev/null || true
-            echo ""
-            echo "📂 /opt contents:"
-            ls -la /opt/ 2>/dev/null || true
-            ls -la /opt/piavpn/ 2>/dev/null || true
-            echo ""
-            echo "📋 Recent installer output in syslog:"
-            sudo tail -30 /var/log/syslog 2>/dev/null | grep -i pia || true
-            echo ""
-            echo "📋 systemd services with pia:"
-            systemctl list-units --all | grep -i pia || true
-            exit 1
-          fi
+print("📦 Checking/installing dependencies...")
+for imp_name, pip_pkg in REQUIREMENTS.items():
+    ensure_import(imp_name, pip_pkg)
 
-      - name: Login and Connect PIA VPN
-        run: |
-          # Make sure piactl is in PATH
-          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
-          
-          # Enable background mode (no GUI needed)
-          piactl background enable || true
-          sleep 3
-          
-          # Login using credentials file
-          CREDS_FILE=$(mktemp)
-          printf 'p8158950\nGoYoula@niba12$2323' > "$CREDS_FILE"
-          piactl login "$CREDS_FILE"
-          rm -f "$CREDS_FILE"
-          sleep 5
-          
-          # Pick a random US location and connect
-          LOCATIONS=("us-east" "us-west" "us-california" "us-chicago" "us-texas" "us-florida" "us-atlanta" "us-denver" "us-seattle" "us-new-york-city")
-          LOCATION=${LOCATIONS[$RANDOM % ${#LOCATIONS[@]}]}
-          echo "🌐 Connecting to PIA: $LOCATION"
-          piactl set region "$LOCATION"
-          piactl connect
-          
-          # Wait for connection (max 30s)
-          CONNECTED=false
-          for i in $(seq 1 15); do
-            sleep 2
-            STATE=$(piactl get connectionstate)
-            echo "   ⏳ State: $STATE ($i/15)"
-            if [ "$STATE" = "Connected" ]; then
-              CONNECTED=true
-              break
-            fi
-          done
-          
-          if [ "$CONNECTED" = true ]; then
-            echo "✅ PIA VPN connected to $LOCATION!"
-            IP=$(curl -s --max-time 10 https://api.ipify.org)
-            echo "📍 Public IP: $IP"
-          else
-            echo "⚠️ VPN connection slow, Mainbot.py will handle it"
-          fi
+# Force-install extras (e.g. camoufox[geoip]) even if base package present
+for imp_name, extra_pkg in FORCE_INSTALL_EXTRAS.items():
+    try:
+        # Check if the extra is actually available (geoip2 module)
+        importlib.import_module("geoip2")
+        INSTALL_RESULTS.append(f"✅ {extra_pkg}: geoip extra present")
+    except ImportError:
+        try:
+            print(f"📦 Installing extra: {extra_pkg}...")
+            _pip_install(extra_pkg)
+            INSTALL_RESULTS.append(f"✅ {extra_pkg}: extra installed")
+        except Exception as e:
+            INSTALL_RESULTS.append(f"⚠️ {extra_pkg}: extra install failed - {e}")
 
-      # ─── RUN THE SCRAPER ─────────────────────────────────────────
-      - name: Run Scraper
-        env:
-          PIA_USERNAME: "p8158950"
-          PIA_PASSWORD: "GoYoula@niba12$2323"
-          FGOS_API_KEY: "fgos-scraper-key-2026-secure"
-        run: |
-          echo ""
-          echo "=========================================="
-          echo "  🚀 Starting Fiverr Scraper (FGOS Fleet)"
-          echo "=========================================="
-          echo "  Mode: Direct on runner + PIA VPN"
-          echo "  Backend: FGOS Fleet API"
-          echo "  Display: Virtual (Xvfb :99)"
-          echo "=========================================="
-          echo ""
-          
-          # Make sure piactl is in PATH
-          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
-          
-          python Mainbot.py
+# Show what happened
+print("\n--- Dependency Status ---")
+for result in INSTALL_RESULTS:
+    print(f"  {result}")
+print("-------------------------\n")
+
+# Playwright & Camoufox setup
+if ensure_import("playwright", "playwright"):
+    try:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "firefox"], check=True)
+    except: pass
+
+try:
+    subprocess.run([sys.executable, "-m", "camoufox", "fetch"], check=True)
+except: pass
+
+# ---------------------------------------------------------------------------
+
+import asyncio
+import os
+import random
+import json
+import csv
+import io
+import socket
+from datetime import datetime, timezone
+from urllib.parse import quote
+import requests
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# FGOS Fleet API (replaces GitHub coordination)
+FGOS_API_URL = "https://api.fgos.site/api/v1/ingestion/fleet"
+FGOS_API_KEY = os.environ.get("FGOS_API_KEY", "fgos-scraper-key-2026-secure")
+FGOS_HEADERS = {"Content-Type": "application/json", "x-api-key": FGOS_API_KEY}
+VM_ID = f"vm-{socket.gethostname()[-8:]}-{random.randint(1000,9999)}"
+FGOS_SESSION_ID = None  # Set after registration
+
+# Scraping settings
+MAX_PAGES = 10  # Fiverr allows 10 pages max
+MIN_DELAY = 2.0
+MAX_DELAY = 4.0
+
+# PHASE 2 PARALLEL BROWSERS - Lightweight mode
+NUM_BROWSERS = int(os.environ.get("NUM_BROWSERS", "5"))  # Run 5 parallel browsers
+LIGHTWEIGHT_MIN_DELAY = 1.0  # Faster delays for lightweight mode
+LIGHTWEIGHT_MAX_DELAY = 2.0
+
+# Resources to BLOCK in Phase 2 (saves bandwidth + memory)
+BLOCKED_RESOURCE_TYPES = [
+    'image', 'stylesheet', 'font', 'media', 
+    'texttrack', 'eventsource', 'websocket', 'manifest',
+]
+
+# URLs to block (tracking, analytics, ads, images)
+BLOCKED_URL_PATTERNS = [
+    'google-analytics', 'googletagmanager', 'facebook.com/tr', 'hotjar',
+    'segment', 'amplitude', 'mixpanel', 'doubleclick', 'googlesyndication',
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico',
+    '.woff', '.ttf', '.eot', '.css',
+]
+
+# PIA VPN Configuration
+PIA_PATH = r"C:\Program Files\Private Internet Access\piactl.exe"
+
+# PIA Credentials (from environment variables — no hardcoded defaults)
+PIA_USERNAME = os.environ.get("PIA_USERNAME", "")
+PIA_PASSWORD = os.environ.get("PIA_PASSWORD", "")
+
+# All PIA VPN locations (will pick random) ok
+PIA_LOCATIONS = [
+    # USA
+    "us-east", "us-west", "us-california", "us-chicago", "us-texas",
+    "us-florida", "us-atlanta", "us-denver", "us-seattle", "us-new-york-city",
+    # Europe
+    "uk-london", "de-berlin", "fr-paris", "nl-amsterdam", "es-madrid",
+    "it-milano", "se-stockholm", "ch-zurich", "at-vienna", "be-brussels",
+    # Asia Pacific
+    "au-sydney", "au-melbourne", "jp-tokyo", "sg-singapore", "hk-hongkong",
+    "in-mumbai", "kr-seoul",
+    # Americas
+    "ca-toronto", "ca-montreal", "ca-vancouver", "mx-mexico", "br-saopaulo",
+    "ar-buenosaires",
+]
+
+# Current session IP info (will be set after VPN connects)
+SESSION_IP = None
+SESSION_CITY = None
+SESSION_COUNTRY = None
+SESSION_VPN_LOCATION = None
+
+# Default keywords (will load from FGOS if available)
+DEFAULT_KEYWORDS = [
+    "video ads",
+    "commercial video",
+    "tiktok ads",
+    "facebook video ads",
+    "ugc video",
+    "promotional video",
+    "product video",
+    "explainer video",
+    "youtube ads",
+    "instagram reels"
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAKISTAN TIME - All VMs use Pakistan Standard Time (UTC+5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_pakistan_now():
+    """Get current time in Pakistan Standard Time (UTC+5)."""
+    from datetime import timedelta
+    utc_now = datetime.now(timezone.utc)
+    pkt = timezone(timedelta(hours=5))  # Pakistan is UTC+5
+    return utc_now.astimezone(pkt)
+
+def get_utc_now():
+    """Get current UTC time (kept for compatibility)."""
+    return datetime.now(timezone.utc)
+
+def get_time_period():
+    """Get current time period based on Pakistan time.
+    
+    Returns:
+        'AM' if Pakistan hour is 0-11 (12:00 AM to 11:59 AM Pakistan)
+        'PM' if Pakistan hour is 12-23 (12:00 PM to 11:59 PM Pakistan)
+    """
+    pk_hour = get_pakistan_now().hour
+    return 'AM' if pk_hour < 12 else 'PM'
+
+def get_data_folder_path():
+    """Get the data folder path for current session.
+    
+    Format: scraped_data/{YYYY-MM-DD}/{AM or PM}/
+    Uses Pakistan date and time period.
+    """
+    pk_now = get_pakistan_now()
+    date_str = pk_now.strftime('%Y-%m-%d')
+    period = get_time_period()
+    return f"scraped_data/{date_str}/{period}"
+
+# Session timestamp using Pakistan Time (PKT = UTC+5)
+PK_NOW = get_pakistan_now()
+UTC_NOW = get_utc_now()
+SESSION_DATE = PK_NOW.strftime('%Y-%m-%d')  # Pakistan date
+SESSION_PERIOD = get_time_period()           # Pakistan AM/PM
+SESSION_TIMESTAMP = PK_NOW.strftime("%Y%m%d_%H%M%S")
+DATA_FOLDER = get_data_folder_path()
+
+# Session log buffer (stores all logs for FGOS)
+SESSION_LOGS = []
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTROL FLAGS (no keyboard listener — fully automated)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CONTROL = {
+    'skip_to_phase2': False,
+    'phase1_only': False,
+    'paused': False,
+    'skip_current': False,
+    'quit': False,
+}
+
+def start_keyboard_listener():
+    """No-op — keyboard controls removed to prevent ghost input."""
+    pass
+
+async def check_controls():
+    """No-op — always continue."""
+    return True
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FGOS API HELPER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fgos_api(method, path, json_data=None, params=None, timeout=20):
+    """Call FGOS fleet API. Returns (response_json, success_bool)."""
+    url = f"{FGOS_API_URL}/{path}"
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.request(
+                method, url,
+                headers=FGOS_HEADERS,
+                json=json_data,
+                params=params,
+                timeout=timeout
+            )
+            if r.status_code in [200, 201]:
+                try:
+                    return r.json(), True
+                except:
+                    return {}, True
+            else:
+                # Log non-200 responses so we can debug
+                body_preview = r.text[:300] if r.text else '(empty)'
+                last_err = f"HTTP {r.status_code}: {body_preview}"
+                print(f"FGOS API [{path}] attempt {attempt+1}/3: {last_err}")
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+        except Exception as e:
+            last_err = str(e)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"FGOS API error ({path}): {e}")
+    if last_err:
+        print(f"FGOS API [{path}] FAILED after 3 attempts: {last_err[:200]}")
+    return {}, False
+
+def fgos_register():
+    """Register this VM with FGOS and get session_id."""
+    global FGOS_SESSION_ID
+    data, ok = fgos_api("POST", "register", {"vm_id": VM_ID})
+    if ok:
+        FGOS_SESSION_ID = data.get("session_id") or data.get("id")
+        print(f"✅ Registered with FGOS — session: {FGOS_SESSION_ID}")
+        return True
+    print("⚠️ Could not register with FGOS (will continue anyway)")
+    return False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HEARTBEAT - Send to FGOS fleet API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import threading as _threading
+_heartbeat_stop = _threading.Event()
+
+# Global counters for heartbeat reporting
+_HEARTBEAT_COUNTERS = {"keywords_done": 0, "gigs_done": 0, "gigs_found": 0, "errors_count": 0}
+
+def update_heartbeat_counters(**kwargs):
+    """Update counters that get sent with every heartbeat."""
+    for k, v in kwargs.items():
+        if k in _HEARTBEAT_COUNTERS:
+            _HEARTBEAT_COUNTERS[k] = v
+
+def send_heartbeat(status, message=""):
+    """Send heartbeat to FGOS fleet API."""
+    try:
+        payload = {
+            "vm_id": VM_ID,
+            "status": status,
+            "message": message[:200] if message else "",
+            "keywords_done": _HEARTBEAT_COUNTERS["keywords_done"],
+            "gigs_done": _HEARTBEAT_COUNTERS["gigs_done"],
+            "gigs_found": _HEARTBEAT_COUNTERS["gigs_found"],
+            "errors_count": _HEARTBEAT_COUNTERS["errors_count"],
+        }
+        if FGOS_SESSION_ID:
+            payload["session_id"] = FGOS_SESSION_ID
+        if SESSION_VPN_LOCATION:
+            payload["vpn_location"] = SESSION_VPN_LOCATION
+        if SESSION_IP:
+            payload["ip_address"] = SESSION_IP
+        fgos_api("POST", "heartbeat", payload)
+        return True
+    except:
+        return False
+
+def _heartbeat_loop():
+    """Background thread: send heartbeat every 30s."""
+    while not _heartbeat_stop.is_set():
+        send_heartbeat("ALIVE")
+        _heartbeat_stop.wait(30)
+
+def start_heartbeat_thread():
+    """Start background heartbeat thread."""
+    t = _threading.Thread(target=_heartbeat_loop, daemon=True)
+    t.start()
+
+def stop_heartbeat_thread():
+    """Stop the background heartbeat."""
+    _heartbeat_stop.set()
+
+def send_startup_heartbeat():
+    """Register with FGOS and start heartbeat thread."""
+    print(f"💓 Registering with FGOS...")
+    fgos_register()
+    start_heartbeat_thread()
+    send_heartbeat("STARTED", "Script launched, initializing...")
+
+def send_error_heartbeat(error_msg):
+    """Send error notification to FGOS."""
+    send_heartbeat("ERROR", str(error_msg)[:200])
+
+def send_complete_heartbeat(summary):
+    """Send completion notification to FGOS."""
+    send_heartbeat("COMPLETED", summary)
+    stop_heartbeat_thread()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# FGOS log buffer - auto-flushes every 50 entries
+_LOG_BUFFER = []
+_LOG_BUFFER_LOCK = _threading.Lock()
+
+def _flush_logs_to_fgos():
+    """Send buffered logs to FGOS."""
+    global _LOG_BUFFER
+    with _LOG_BUFFER_LOCK:
+        if not _LOG_BUFFER:
+            return
+        batch = _LOG_BUFFER[:]
+        _LOG_BUFFER = []
+    try:
+        fgos_api("POST", "logs", {
+            "vm_id": VM_ID,
+            "session_id": FGOS_SESSION_ID,
+            "logs": batch
+        }, timeout=10)
+    except:
+        pass  # Don't crash on log failure
+
+def log(msg, level="info"):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    full_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] [{VM_ID}] {msg}"
+    print(log_line)
+    # Store in buffer for FGOS — backend expects {level, message, source} objects
+    log_entry = {"level": level, "message": f"[{full_timestamp}] [{VM_ID}] {msg}", "source": "runner"}
+    SESSION_LOGS.append(log_entry)
+    with _LOG_BUFFER_LOCK:
+        _LOG_BUFFER.append(log_entry)
+        if len(_LOG_BUFFER) >= 50:
+            pass  # Will flush below
+        else:
+            return
+    _flush_logs_to_fgos()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PIA VPN FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def pia_run_command(args):
+    """Run a PIA command and return output."""
+    try:
+        if isinstance(args, str):
+            args = [args]
+        result = subprocess.run([PIA_PATH] + args, capture_output=True, text=True, timeout=15)
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
+    except Exception as e:
+        return "", str(e), -1
+
+def pia_is_installed():
+    """Check if PIA VPN is installed."""
+    return os.path.exists(PIA_PATH)
+
+def pia_get_connection_state():
+    """Get current VPN connection state."""
+    stdout, stderr, code = pia_run_command(["get", "connectionstate"])
+    return stdout if code == 0 else "Unknown"
+
+def pia_is_connected():
+    """Check if PIA VPN is connected."""
+    state = pia_get_connection_state()
+    return state == "Connected"
+
+def pia_is_logged_in():
+    """Check if PIA is logged in by trying to get region."""
+    stdout, stderr, code = pia_run_command(["get", "region"])
+    # If we can get region, we're logged in
+    # If not logged in, it returns error
+    if code == 0 and stdout and "error" not in stdout.lower():
+        return True
+    # Also check if daemon is active
+    state = pia_get_connection_state()
+    if state != "Unknown" and "error" not in state.lower():
+        return True
+    return False
+
+def pia_enable_background():
+    """Enable background mode so VPN works without GUI."""
+    stdout, stderr, code = pia_run_command(["background", "enable"])
+    if code == 0:
+        log("✅ PIA background mode enabled (VPN works without GUI)")
+        return True
+    else:
+        log(f"⚠️ Could not enable background mode: {stderr}")
+        return False
+
+def pia_login():
+    """Login to PIA using credentials from environment variables."""
+    if not PIA_USERNAME or not PIA_PASSWORD:
+        log("⚠️ PIA credentials not set in environment variables")
+        log("   Set PIA_USERNAME and PIA_PASSWORD environment variables")
+        return False
+    
+    log("🔐 Logging into PIA VPN...")
+    
+    # Create temporary credentials file
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(f"{PIA_USERNAME}\n{PIA_PASSWORD}\n")
+            creds_file = f.name
+        
+        # Login using credentials file
+        stdout, stderr, code = pia_run_command(["login", creds_file])
+        
+        # Delete credentials file immediately
+        try:
+            os.remove(creds_file)
+        except:
+            pass
+        
+        if code == 0:
+            log("✅ PIA login successful!")
+            return True
+        else:
+            log(f"❌ PIA login failed: {stderr}")
+            return False
+            
+    except Exception as e:
+        log(f"❌ PIA login error: {e}")
+        return False
+
+def pia_logout():
+    """Logout from PIA."""
+    stdout, stderr, code = pia_run_command(["logout"])
+    return code == 0
+
+def pia_disconnect():
+    """Disconnect PIA VPN."""
+    try:
+        subprocess.run([PIA_PATH, "disconnect"], capture_output=True, timeout=10)
+        time.sleep(2)
+        return True
+    except:
+        return False
+
+def pia_connect_random():
+    """Connect PIA VPN to a random location."""
+    global SESSION_VPN_LOCATION
+    
+    # Disconnect first if connected
+    if pia_is_connected():
+        log("🔌 Disconnecting current VPN...")
+        pia_disconnect()
+        time.sleep(2)
+    
+    # Pick random location
+    location = random.choice(PIA_LOCATIONS)
+    SESSION_VPN_LOCATION = location
+    log(f"🌐 Connecting PIA VPN to: {location}")
+    
+    try:
+        # Set region
+        subprocess.run([PIA_PATH, "set", "region", location], capture_output=True, timeout=10)
+        time.sleep(1)
+        
+        # Connect
+        subprocess.run([PIA_PATH, "connect"], capture_output=True, timeout=10)
+        
+        # Wait for connection (max 30 seconds)
+        for i in range(15):
+            time.sleep(2)
+            if pia_is_connected():
+                log(f"✅ VPN connected to {location}")
+                return True
+            log(f"   ⏳ Waiting for VPN... ({i+1}/15)")
+        
+        log(f"❌ VPN connection timeout for {location}")
+        return False
+    except Exception as e:
+        log(f"❌ VPN error: {e}")
+        return False
+
+def get_current_ip_info():
+    """Get current IP address, city, country. Camoufox handles geo/locale via geoip=True."""
+    global SESSION_IP, SESSION_CITY, SESSION_COUNTRY
+    
+    services = [
+        ("http://ip-api.com/json/?fields=query,city,country,isp",
+         lambda d: (d.get("query"), d.get("city", "Unknown"), d.get("country", "Unknown"), d.get("isp", ""))),
+        ("https://ipapi.co/json/",
+         lambda d: (d.get("ip"), d.get("city", "Unknown"), d.get("country_name", "Unknown"), d.get("org", ""))),
+    ]
+    
+    for url, parse in services:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                ip, city, country, isp = parse(r.json())
+                SESSION_IP = ip
+                SESSION_CITY = city
+                SESSION_COUNTRY = country
+                log(f"📍 IP: {SESSION_IP} | {SESSION_CITY}, {SESSION_COUNTRY} | ISP: {isp}")
+                return True
+        except Exception as e:
+            log(f"   ⚠️ {url[:30]} failed: {e}")
+            continue
+    
+    log("⚠️ Could not detect IP")
+    SESSION_IP = "Unknown"
+    SESSION_CITY = "Unknown"
+    SESSION_COUNTRY = "Unknown"
+    return False
+
+def setup_vpn():
+    """Setup VPN with random location and get IP info."""
+    log("\n" + "="*70)
+    log("🌐 SETTING UP VPN WITH RANDOM LOCATION")
+    log("="*70)
+    
+    # Check if PIA is installed
+    if not pia_is_installed():
+        log(f"⚠️ PIA VPN not found at {PIA_PATH}")
+        log("   Continuing without VPN...")
+        get_current_ip_info()
+        return False
+    
+    log("✅ PIA VPN found")
+    
+    # Check connection state
+    state = pia_get_connection_state()
+    log(f"   Current state: {state}")
+    
+    # Enable background mode (allows VPN without GUI running)
+    pia_enable_background()
+    
+    # Check if logged in
+    if not pia_is_logged_in():
+        log("⚠️ PIA VPN is NOT logged in")
+        
+        # Try to auto-login using environment variables
+        if PIA_USERNAME and PIA_PASSWORD:
+            log("🔐 Attempting auto-login with credentials from environment...")
+            if pia_login():
+                log("✅ Auto-login successful!")
+            else:
+                log("❌ Auto-login failed!")
+                log("   Continuing without VPN...")
+                get_current_ip_info()
+                return False
+        else:
+            log("❌ No PIA credentials available!")
+            log("   Set environment variables: PIA_USERNAME, PIA_PASSWORD")
+            log("   Or login manually: Open PIA GUI and login")
+            log("")
+            log("⚠️ Continuing without VPN...")
+            get_current_ip_info()
+            return False
+    
+    log("✅ PIA VPN is logged in")
+    
+    # Connect to random location
+    if pia_connect_random():
+        time.sleep(3)  # Wait for connection to stabilize
+        get_current_ip_info()
+        return True
+    else:
+        log("⚠️ VPN connection failed, continuing without VPN")
+        get_current_ip_info()
+        return False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FGOS DATA FUNCTIONS (replaced GitHub)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def flush_logs_to_fgos():
+    """Flush all remaining logs to FGOS (call at end of session)."""
+    _flush_logs_to_fgos()
+    # Also send full session log as one final push
+    if SESSION_LOGS:
+        try:
+            fgos_api("POST", "logs", {
+                "vm_id": VM_ID,
+                "session_id": FGOS_SESSION_ID,
+                "logs": SESSION_LOGS[-100:]  # Last 100 lines
+            }, timeout=15)
+        except:
+            pass
+
+def load_keywords_from_fgos():
+    """Load keywords from FGOS fleet API."""
+    data, ok = fgos_api("GET", "keywords", params={"session_id": FGOS_SESSION_ID} if FGOS_SESSION_ID else None)
+    if ok:
+        # API returns {"keywords": [...]} when session exists, or flat list when no session
+        if isinstance(data, list):
+            keywords = data
+        elif isinstance(data, dict):
+            keywords = data.get("keywords", [])
+        else:
+            keywords = []
+        if keywords:
+            log(f"✅ Loaded {len(keywords)} keywords from FGOS")
+            return keywords
+    log("⚠️ No keywords from FGOS, using defaults")
+    return DEFAULT_KEYWORDS
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIG URL HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def clean_gig_url(url):
+    """Remove tracking parameters from URL. Returns clean URL."""
+    if '?' in url:
+        url = url.split('?')[0]
+    return url.strip()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FGOS KEYWORD & GIG CLAIMING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fgos_claim_keyword():
+    """
+    Claim next keyword from FGOS (PostgreSQL FOR UPDATE SKIP LOCKED).
+    Returns (keyword_index, keyword, error) tuple:
+      - (idx, keyword, None) = claimed successfully
+      - (None, None, None) = genuinely all done
+      - (None, None, 'api_error') = API failed, should retry
+    """
+    data, ok = fgos_api("GET", "claim-keyword", params={
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID
+    })
+    if ok:
+        kw = data.get("keyword")
+        idx = data.get("keyword_index", 0)
+        if kw:
+            log(f"🎯 Claimed keyword #{idx}: '{kw}'")
+            return idx, kw, None
+        
+        # API returned OK but no keyword — all keywords are done
+        # (backend returns status:"none" or status:"ok" with no keyword)
+        recovery = _fgos_recover_claimed_keyword()
+        if recovery:
+            return recovery[0], recovery[1], None
+        log("✅ All keywords already claimed/completed")
+        return None, None, None
+
+    # Claim API failed — check if the claim actually succeeded on the server
+    # (response was lost but DB was updated)
+    log("⚠️ Claim-keyword API failed, checking for recovery...")
+    recovery = _fgos_recover_claimed_keyword()
+    if recovery:
+        return recovery[0], recovery[1], None
+
+    log("⚠️ Could not claim keyword from FGOS (API error)")
+    return None, None, 'api_error'
+
+
+def _fgos_recover_claimed_keyword():
+    """Check if this VM already has a claimed (not completed) keyword on server."""
+    data, ok = fgos_api("GET", "my-keywords", params={
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID
+    })
+    if ok and data.get("keywords"):
+        # Find keywords that are claimed but not completed
+        for kw in data["keywords"]:
+            if kw.get("status") == "claimed":
+                idx = kw.get("keyword_index", 0)
+                keyword = kw.get("keyword")
+                if keyword:
+                    log(f"🔄 Recovered claimed keyword #{idx}: '{keyword}' (claim was lost)")
+                    return idx, keyword
+    return None
+
+def fgos_keyword_done(keyword, gigs_found, pages_scraped, gigs=None):
+    """Report keyword completion to FGOS."""
+    payload = {
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID,
+        "keyword": keyword,
+        "gigs_found": gigs_found,
+        "pages_scraped": pages_scraped,
+    }
+    if gigs:
+        # Backend expects [{url, gig_id}] objects, not plain strings
+        payload["gigs"] = [
+            {"url": clean_gig_url(g.get("url", "")), "gig_id": g.get("gig_id", get_gig_id_from_url(g.get("url", "")) or "")}
+            for g in gigs if g.get("url")
+        ]
+    fgos_api("POST", "keyword-done", payload)
+    # Update heartbeat counters
+    update_heartbeat_counters(keywords_done=_HEARTBEAT_COUNTERS["keywords_done"] + 1, gigs_found=_HEARTBEAT_COUNTERS["gigs_found"] + gigs_found)
+
+def fgos_keyword_failed(keyword, error):
+    """Report keyword failure to FGOS."""
+    fgos_api("POST", "keyword-failed", {
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID,
+        "keyword": keyword,
+        "error": str(error)[:200]
+    })
+
+def fgos_claim_gig():
+    """
+    Claim next gig from FGOS.
+    Returns (gig_id, gig_url) or (None, None) if all done.
+    """
+    data, ok = fgos_api("GET", "claim-gig", params={
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID
+    })
+    if ok:
+        gig_id = data.get("gig_id")
+        url = data.get("url", "")
+        if url:
+            return gig_id, url
+        # API returned OK but no gig — all gigs are done
+        return None, None
+    return None, None
+
+def fgos_gig_done(gig_id):
+    """Report gig completion to FGOS."""
+    fgos_api("POST", "gig-done", {
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID,
+        "gig_id": str(gig_id)
+    })
+    # Update heartbeat counters
+    update_heartbeat_counters(gigs_done=_HEARTBEAT_COUNTERS["gigs_done"] + 1)
+
+def fgos_ingest_keyword(keyword, gigs):
+    """Send keyword scrape results to FGOS."""
+    if not gigs:
+        return False
+    sponsored_count = sum(1 for g in gigs if g.get('is_sponsored'))
+    organic_count = len(gigs) - sponsored_count
+    
+    payload = {
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID,
+        "keyword": keyword,
+        "total_gigs": len(gigs),
+        "organic_count": organic_count,
+        "sponsored_count": sponsored_count,
+        "gigs": gigs
+    }
+    # For large payloads (500+ gigs), use longer timeout
+    _timeout = 60 if len(gigs) > 200 else 30
+    data, ok = fgos_api("POST", "ingest-keyword", payload, timeout=_timeout)
+    if ok:
+        log(f"✅ Ingested {len(gigs)} gigs to FGOS for '{keyword}'")
+        log(f"   📊 {organic_count} organic, {sponsored_count} sponsored")
+    else:
+        log(f"❌ Failed to ingest keyword data to FGOS ({len(gigs)} gigs, {_timeout}s timeout)")
+    return ok
+
+def fgos_ingest_gig_details(gig_data_list):
+    """Send gig detail results to FGOS."""
+    if not gig_data_list:
+        return False
+    payload = {
+        "vm_id": VM_ID,
+        "session_id": FGOS_SESSION_ID,
+        "gigs": gig_data_list
+    }
+    data, ok = fgos_api("POST", "ingest-gig-details", payload, timeout=30)
+    if ok:
+        log(f"✅ Ingested {len(gig_data_list)} gig details to FGOS")
+    else:
+        log(f"❌ Failed to ingest gig details to FGOS")
+    return ok
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CAPTCHA DETECTION & IDENTITY RESET
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def detect_captcha(page):
+    """
+    Detect if CAPTCHA is present by checking page title.
+    Fiverr shows "Human Test" or similar in tab title when CAPTCHA appears.
+    """
+    try:
+        title = await page.title()
+        title_lower = title.lower()
+        
+        # Check for CAPTCHA indicators in title
+        captcha_indicators = [
+            'human test',
+            'captcha',
+            'verify',
+            'robot',
+            'challenge',
+            'security check',
+            'blocked',
+            'access denied'
+        ]
+        
+        for indicator in captcha_indicators:
+            if indicator in title_lower:
+                log(f"🛑 CAPTCHA DETECTED! Tab title: '{title}'")
+                return True
+        
+        # Also check page content for common CAPTCHA elements
+        captcha_in_page = await page.evaluate('''
+            () => {
+                const body = document.body ? document.body.innerText.toLowerCase() : '';
+                const html = document.documentElement.innerHTML.toLowerCase();
+                
+                // Check for CAPTCHA iframes or elements
+                const hasCaptchaIframe = document.querySelector('iframe[src*="captcha"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"]');
+                const hasCaptchaDiv = document.querySelector('[class*="captcha"], [id*="captcha"], [class*="challenge"]');
+                
+                // Check for blocking messages
+                const blockingTexts = ['verify you are human', 'complete the captcha', 'security check', 'prove you are not a robot'];
+                const hasBlockingText = blockingTexts.some(t => body.includes(t));
+                
+                return hasCaptchaIframe || hasCaptchaDiv || hasBlockingText;
+            }
+        ''')
+        
+        if captcha_in_page:
+            log(f"🛑 CAPTCHA DETECTED in page content!")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        log(f"⚠️ Error checking for CAPTCHA: {e}")
+        return False
+
+async def reset_identity(browser):
+    """
+    Reset identity when CAPTCHA detected:
+    1. Close browser (clears fingerprint)
+    2. Disconnect VPN
+    3. Connect to NEW VPN location (new IP)
+    4. Relaunch browser (new fingerprint)
+    
+    Returns: (new_browser, new_page) or (None, None) on failure
+    """
+    log("\n" + "="*50)
+    log("🔄 IDENTITY RESET - Getting new identity...")
+    log("="*50)
+    
+    # 1. Close browser
+    try:
+        log("   1️⃣ Closing browser...")
+        await browser.__aexit__(None, None, None)
+    except Exception as e:
+        log(f"   ⚠️ Browser close error (ok): {e}")
+    
+    # 2. Disconnect VPN
+    log("   2️⃣ Disconnecting VPN...")
+    pia_disconnect()
+    time.sleep(2)
+    
+    # 3. Connect to new random location
+    log("   3️⃣ Connecting to NEW VPN location...")
+    old_location = SESSION_VPN_LOCATION
+    success = pia_connect_random()
+    
+    if success:
+        time.sleep(3)  # Wait for connection
+        get_current_ip_info()
+        log(f"   ✅ New location: {SESSION_VPN_LOCATION} (was: {old_location})")
+    else:
+        log("   ⚠️ VPN reconnect failed, trying anyway...")
+    
+    # 4. Relaunch browser
+    log("   4️⃣ Launching NEW browser (new fingerprint)...")
+    try:
+        new_browser, new_page = await create_browser()
+        
+        # Warmup the new browser
+        try:
+            await new_page.goto("https://www.fiverr.com", timeout=60000)
+            await asyncio.sleep(2)
+            await dismiss_popups(new_page)
+        except:
+            pass
+        
+        log("   ✅ NEW IDENTITY READY!")
+        log(f"      IP: {SESSION_IP}")
+        log(f"      Location: {SESSION_VPN_LOCATION}")
+        log("="*50 + "\n")
+        return new_browser, None, new_page
+    except Exception as e:
+        log(f"   ❌ Browser relaunch failed: {e}")
+        return None, None, None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BROWSER LAUNCH — DEFAULT CAMOUFOX (no overconfig)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Camoufox handles everything internally via BrowserForge:
+#   - Random OS fingerprint (market-share weighted)
+#   - Random screen, WebGL, canvas, fonts, UA, hardware concurrency
+#   - Built-in uBlock Origin
+#   - Human-like cursor movement
+#   - Anti-fingerprinting at C++ level
+# We just launch it with defaults. Don't over-configure.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def create_browser():
+    """Create default Camoufox browser.
+    
+    Camoufox auto-generates a complete random identity per launch:
+    fingerprint, screen, WebGL, canvas, fonts, UA — all handled internally.
+    Always runs visible (headless=False).
+    Falls back to no-geoip if geoip extra is missing.
+    """
+    from camoufox.async_api import AsyncCamoufox
+    
+    log("🚀 Launching Camoufox browser (visible)...")
+    
+    # Try with geoip first, fallback without if extra not installed
+    try:
+        camoufox = await AsyncCamoufox(
+            headless=False,
+            geoip=True,
+        ).__aenter__()
+    except Exception as e:
+        err = str(e)
+        if 'geoip' in err.lower() or 'NotInstalledGeoIPExtra' in err:
+            log(f"⚠️ geoip extra not installed, launching without geoip...")
+        else:
+            log(f"⚠️ Browser launch error: {err[:80]}, retrying without geoip...")
+        camoufox = await AsyncCamoufox(
+            headless=False,
+        ).__aenter__()
+    
+    page = await camoufox.new_page()
+    
+    log("✅ Browser ready")
+    
+    return camoufox, page
+
+
+async def create_lightweight_browser(browser_id=1):
+    """Create lightweight Camoufox browser for Phase 2 — blocks images to save bandwidth."""
+    from camoufox.async_api import AsyncCamoufox
+    
+    log(f"🚀 Launching lightweight browser #{browser_id} (visible)...")
+    
+    try:
+        camoufox = await AsyncCamoufox(
+            headless=False,
+            geoip=True,
+        ).__aenter__()
+    except Exception as e:
+        err = str(e)
+        if 'geoip' in err.lower() or 'NotInstalledGeoIPExtra' in err:
+            log(f"⚠️ geoip extra not installed, launching without geoip...")
+        else:
+            log(f"⚠️ Launch error: {err[:80]}, retrying without geoip...")
+        camoufox = await AsyncCamoufox(
+            headless=False,
+        ).__aenter__()
+    
+    page = await camoufox.new_page()
+    
+    # BLOCK IMAGES, CSS, FONTS - saves memory + bandwidth
+    async def block_resources(route):
+        request = route.request
+        resource_type = request.resource_type
+        url = request.url.lower()
+        
+        # Block heavy resource types
+        if resource_type in BLOCKED_RESOURCE_TYPES:
+            await route.abort()
+            return
+        
+        # Block by URL patterns
+        for pattern in BLOCKED_URL_PATTERNS:
+            if pattern in url:
+                await route.abort()
+                return
+        
+        await route.continue_()
+    
+    await page.route("**/*", block_resources)
+    
+    log(f"✅ Lightweight browser #{browser_id} ready")
+    
+    return camoufox, page
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POPUP/MODAL HANDLING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def dismiss_popups(page):
+    """Dismiss any visible popups/modals with a single Escape press."""
+    try:
+        await page.keyboard.press('Escape')
+        await asyncio.sleep(0.3)
+    except:
+        pass
+    return True
+
+async def safe_click(page, selector, timeout=5000):
+    """Safely click an element, dismissing popups if needed."""
+    max_attempts = 3
+    
+    for attempt in range(max_attempts):
+        try:
+            element = await page.wait_for_selector(selector, timeout=timeout)
+            if element:
+                await element.click()
+                return True
+        except Exception as e:
+            error_msg = str(e).lower()
+            # If element is covered by another element, dismiss popups and retry
+            if 'intercept' in error_msg or 'covered' in error_msg or 'another element' in error_msg:
+                log(f"⚠️ Element blocked, dismissing popups (attempt {attempt + 1})")
+                await dismiss_popups(page)
+                await asyncio.sleep(0.5)
+            else:
+                break
+    
+    return False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCRAPING FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def search_keyword_humanized(page, keyword):
+    """Go to Fiverr homepage and search like a human. Retries on nav failure."""
+    
+    # Navigate to Fiverr with retry logic
+    max_nav_retries = 3
+    nav_ok = False
+    for attempt in range(1, max_nav_retries + 1):
+        try:
+            log(f"🏠 Going to Fiverr homepage..." + (f" (attempt {attempt})" if attempt > 1 else ""))
+            await page.goto("https://www.fiverr.com", wait_until="domcontentloaded", timeout=60000)
+            nav_ok = True
+            break
+        except Exception as nav_err:
+            err_str = str(nav_err)
+            log(f"⚠️ Navigation failed (attempt {attempt}/{max_nav_retries}): {err_str[:80]}")
+            if attempt < max_nav_retries:
+                wait_time = 5 * attempt
+                log(f"   ⏳ Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                log(f"❌ Navigation failed after {max_nav_retries} attempts")
+                return False
+    
+    if not nav_ok:
+        return False
+    
+    # Wait for page to settle
+    await asyncio.sleep(random.uniform(2, 4))
+    
+    # Find search box
+    search_selectors = [
+        "input[type='search'][placeholder='Search for any service...']",
+        "input[placeholder*='Search']",
+        "input.search-input",
+        "input[name='query']",
+        "input[type='search']",
+        "#search-input",
+        "[data-testid='search-input']"
+    ]
+    
+    search_box = None
+    for selector in search_selectors:
+        try:
+            search_box = await page.wait_for_selector(selector, timeout=5000)
+            if search_box:
+                log(f"✅ Found search box")
+                break
+        except:
+            continue
+    
+    if not search_box:
+        # Log page state for debugging
+        try:
+            page_url = page.url
+            page_title = await page.title()
+            log(f"❌ Could not find search box! URL={page_url}, Title='{page_title[:60]}'")
+            # Check if it's a captcha/challenge page
+            body_text = await page.evaluate('document.body?.innerText?.substring(0, 200) || ""')
+            if body_text:
+                log(f"   📄 Page content: {body_text[:150]}")
+        except:
+            log("❌ Could not find search box! (failed to get page info)")
+        return False
+    
+    # Click and type like a human
+    await search_box.click()
+    await asyncio.sleep(random.uniform(0.3, 0.7))
+    
+    # Type character by character with random delays
+    for char in keyword:
+        await page.keyboard.type(char)
+        await asyncio.sleep(random.uniform(0.05, 0.15))
+    
+    log(f"⌨️ Typed: '{keyword}'")
+    await asyncio.sleep(random.uniform(0.5, 1.0))
+    
+    # Submit search
+    await page.keyboard.press("Enter")
+    log("🔍 Search submitted")
+    
+    # Wait for results
+    await asyncio.sleep(random.uniform(3, 5))
+    
+    # Dismiss any popups that appeared after search
+    await dismiss_popups(page)
+    
+    return True
+
+async def extract_gigs_from_page(page, page_num, keyword):
+    """Extract ALL gigs from current page with their positions, detecting sponsored ads."""
+    gigs = []
+    
+    # Dismiss any popups before extracting
+    await dismiss_popups(page)
+    
+    # Wait for gig cards to load
+    try:
+        await page.wait_for_selector('.gig-card-layout, div[data-gig-id], .gig-wrapper, .basic-gig-card', timeout=15000)
+    except:
+        pass
+    
+    # Dismiss any popups that appeared
+    await dismiss_popups(page)
+    
+    # Scroll down to load ALL gigs (Fiverr uses lazy loading)
+    for i in range(5):
+        await page.evaluate(f'window.scrollTo(0, document.body.scrollHeight * {(i+1)/5})')
+        await asyncio.sleep(0.5)
+    
+    # Scroll back to top
+    await page.evaluate('window.scrollTo(0, 0)')
+    await asyncio.sleep(1)
+    
+    # Extract gig URLs using JavaScript - also detect sponsored/promoted gigs
+    js_result = await page.evaluate('''
+        () => {
+            const gigs = [];
+            const seen = new Set();
+            let organicPosition = 0;
+            let adPosition = 0;
+            
+            // Known organic badge image filename (Fiverr uses image badges, not text!)
+            // Organic gigs use: zUUYHKl3t97xHPG1.png
+            // Ad gigs use different images like: 65jNBr1mdFbLzs0b.png, kcHY4XIS1zG1WLfq.png, 3AUmqmS6n9Ky56sH.png
+            const ORGANIC_BADGE = 'zUUYHKl3t97xHPG1.png';
+            
+            // Find all gig cards (not just links)
+            const gigCards = document.querySelectorAll('.gig-card-layout, .basic-gig-card, .gig-wrapper, [class*="gig-card"]');
+            
+            gigCards.forEach(card => {
+                // Check if this gig is a sponsored ad by looking at the badge IMAGE
+                // Fiverr uses images instead of text for "Ad" labels to avoid detection
+                
+                let isSponsored = false;
+                
+                // Method 1: Check badge image in the seller area
+                // The badge image appears right after the username link in span._1lc1p3l1
+                const sellerSpan = card.querySelector('span._1lc1p3l1, span[class*="1lc1p3l"]');
+                if (sellerSpan) {
+                    const badgeImg = sellerSpan.querySelector('img[src*="generic_asset"]');
+                    if (badgeImg) {
+                        const src = badgeImg.src || badgeImg.getAttribute('src') || '';
+                        // If badge is NOT the organic badge, it's an ad
+                        if (!src.includes(ORGANIC_BADGE)) {
+                            isSponsored = true;
+                        }
+                    }
+                }
+                
+                // Method 2: Check all badge images in the card's seller area
+                if (!isSponsored) {
+                    const badgeImages = card.querySelectorAll('img[src*="generic_asset/asset/18e23d1a4837c0351e5e1096d73da37a"]');
+                    badgeImages.forEach(img => {
+                        const src = img.src || img.getAttribute('src') || '';
+                        if (src && !src.includes(ORGANIC_BADGE)) {
+                            isSponsored = true;
+                        }
+                    });
+                }
+                
+                // Find the gig link within this card
+                const link = card.querySelector('a[href*="fiverr.com/"]') || card.closest('a[href*="fiverr.com/"]');
+                if (!link) return;
+                
+                const href = link.href || link.getAttribute('href');
+                if (!href) return;
+                
+                // Match gig URL pattern: fiverr.com/username/gig-slug
+                const match = href.match(/fiverr\\.com\\/([a-z0-9_]+)\\/([a-z0-9_-]+)/i);
+                if (match) {
+                    const username = match[1].toLowerCase();
+                    const slug = match[2].toLowerCase();
+                    
+                    // Skip non-gig URLs
+                    if (['categories', 'search', 'resources', 'help', 'cp', 'business', 'pro'].includes(username)) return;
+                    if (slug.includes('?')) return;
+                    
+                    const gig_id = username + '_' + slug;
+                    if (!seen.has(gig_id)) {
+                        seen.add(gig_id);
+                        
+                        // Track position separately for ads vs organic
+                        if (isSponsored) {
+                            adPosition++;
+                        } else {
+                            organicPosition++;
+                        }
+                        
+                        gigs.push({
+                            gig_id: gig_id,
+                            username: username,
+                            gig_slug: slug,
+                            url: 'https://www.fiverr.com/' + username + '/' + slug,
+                            is_sponsored: isSponsored,
+                            ad_position: isSponsored ? adPosition : null,
+                            organic_position: isSponsored ? null : organicPosition
+                        });
+                    }
+                }
+            });
+            
+            // If card-based detection found nothing, fallback to link-based
+            if (gigs.length === 0) {
+                document.querySelectorAll('.basic-gig-card a, .gig-card-layout a, .gig-wrapper a, a[href*="fiverr.com/"]').forEach(a => {
+                    const href = a.href || a.getAttribute('href');
+                    if (!href) return;
+                    
+                    const match = href.match(/fiverr\\.com\\/([a-z0-9_]+)\\/([a-z0-9_-]+)/i);
+                    if (match) {
+                        const username = match[1].toLowerCase();
+                        const slug = match[2].toLowerCase();
+                        
+                        if (['categories', 'search', 'resources', 'help', 'cp', 'business', 'pro'].includes(username)) return;
+                        if (slug.includes('?')) return;
+                        
+                        const gig_id = username + '_' + slug;
+                        if (!seen.has(gig_id)) {
+                            seen.add(gig_id);
+                            organicPosition++;
+                            gigs.push({
+                                gig_id: gig_id,
+                                username: username,
+                                gig_slug: slug,
+                                url: 'https://www.fiverr.com/' + username + '/' + slug,
+                                is_sponsored: false,
+                                ad_position: null,
+                                organic_position: organicPosition
+                            });
+                        }
+                    }
+                });
+            }
+            
+            return gigs;
+        }
+    ''')
+    
+    # Calculate page-based positions
+    base_organic = (page_num - 1) * 48  # Approximate organic gigs per page
+    base_ad = (page_num - 1) * 10  # Approximate ads per page (usually fewer)
+    
+    # Add metadata (including IP/location)
+    scraped_at = datetime.now().isoformat()
+    overall_position = 0
+    
+    for gig in js_result:
+        overall_position += 1
+        gig['overall_position'] = (page_num - 1) * 48 + overall_position  # Position on page regardless of ad/organic
+        gig['page'] = page_num
+        gig['keyword'] = keyword
+        gig['scraped_at'] = scraped_at
+        gig['ip_address'] = SESSION_IP or 'Unknown'
+        gig['city'] = SESSION_CITY or 'Unknown'
+        gig['country'] = SESSION_COUNTRY or 'Unknown'
+        gig['vpn_location'] = SESSION_VPN_LOCATION or 'None'
+        
+        # Adjust page-based organic/ad positions
+        if gig.get('organic_position'):
+            gig['organic_position'] = base_organic + gig['organic_position']
+        if gig.get('ad_position'):
+            gig['ad_position'] = base_ad + gig['ad_position']
+        
+        gigs.append(gig)
+    
+    # Log sponsored vs organic counts
+    sponsored_count = sum(1 for g in gigs if g.get('is_sponsored'))
+    organic_count = len(gigs) - sponsored_count
+    if sponsored_count > 0:
+        log(f"   📢 Found {sponsored_count} ads, {organic_count} organic gigs")
+    
+    return gigs
+
+async def go_to_next_page(page, current_page):
+    """Navigate to next page of results."""
+    # Dismiss any popups before clicking
+    await dismiss_popups(page)
+    
+    # Try clicking next button
+    next_selectors = [
+        'a[rel="next"]',
+        '.pagination-next',
+        f'a[href*="page={current_page + 1}"]',
+        'button:has-text("Next")',
+        '.pagination a:last-child'
+    ]
+    
+    for selector in next_selectors:
+        try:
+            next_btn = await page.query_selector(selector)
+            if next_btn:
+                is_visible = await next_btn.is_visible()
+                if is_visible:
+                    # Try to click, dismiss popup if blocked
+                    try:
+                        await next_btn.click()
+                    except Exception as click_err:
+                        if 'intercept' in str(click_err).lower():
+                            await dismiss_popups(page)
+                            await asyncio.sleep(0.5)
+                            await next_btn.click()
+                    await asyncio.sleep(random.uniform(3, 5))
+                    # Dismiss any popups on new page
+                    await dismiss_popups(page)
+                    return True
+        except:
+            continue
+    
+    # Try URL-based pagination (more reliable)
+    try:
+        current_url = page.url
+        if 'page=' in current_url:
+            new_url = current_url.replace(f'page={current_page}', f'page={current_page + 1}')
+        else:
+            separator = '&' if '?' in current_url else '?'
+            new_url = f"{current_url}{separator}page={current_page + 1}"
+        
+        await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(random.uniform(2, 4))
+        # Dismiss any popups on new page
+        await dismiss_popups(page)
+        return True
+    except:
+        return False
+
+async def scrape_keyword_all_pages(page, keyword):
+    """Scrape ALL pages (up to 10) for a keyword and extract ALL gigs."""
+    all_gigs = []
+    
+    log(f"\n{'='*70}")
+    log(f"🔍 SCRAPING KEYWORD: '{keyword}'")
+    log(f"{'='*70}")
+    
+    # Search the keyword
+    if not await search_keyword_humanized(page, keyword):
+        return all_gigs
+    
+    # Scrape each page
+    for page_num in range(1, MAX_PAGES + 1):
+        log(f"\n📄 Page {page_num}/{MAX_PAGES}...")
+        
+        # Extract gigs from current page
+        gigs = await extract_gigs_from_page(page, page_num, keyword)
+        
+        if not gigs:
+            log(f"   ⚠️ No gigs found on page {page_num}, stopping")
+            break
+        
+        all_gigs.extend(gigs)
+        log(f"   ✅ Extracted {len(gigs)} gigs (Total: {len(all_gigs)})")
+        
+        # Check if we've reached the last page
+        if page_num >= MAX_PAGES:
+            log(f"   📊 Reached max pages ({MAX_PAGES})")
+            break
+        
+        # Go to next page
+        log(f"   ➡️ Going to page {page_num + 1}...")
+        if not await go_to_next_page(page, page_num):
+            log(f"   ⚠️ No more pages available")
+            break
+        
+        # Random delay between pages
+        await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+    
+    log(f"\n✅ KEYWORD '{keyword}' COMPLETE: {len(all_gigs)} total gigs")
+    
+    # Summary with sponsored breakdown
+    sponsored = sum(1 for g in all_gigs if g.get('is_sponsored'))
+    organic = len(all_gigs) - sponsored
+    log(f"   📊 {organic} organic gigs, {sponsored} sponsored ads")
+    
+    # Check for NEW gigs (not in master list) and track them
+    # (FGOS tracks gig URLs automatically via ingest-keyword)
+    
+    return all_gigs
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SAVE TO FGOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_keyword_results(keyword, gigs):
+    """Save keyword scrape results to FGOS."""
+    if not gigs:
+        log(f"⚠️ No gigs to save for '{keyword}'")
+        return False
+    return fgos_ingest_keyword(keyword, gigs)
+
+def save_session_summary(all_results):
+    """Log session summary (FGOS already has all data from per-keyword ingestion)."""
+    if not all_results:
+        return False
+    total_gigs = sum(len(g) for g in all_results.values())
+    total_sponsored = sum(1 for gigs in all_results.values() for g in gigs if g.get('is_sponsored'))
+    total_organic = total_gigs - total_sponsored
+    log(f"✅ Session summary: {total_gigs} gigs ({total_organic} organic, {total_sponsored} ads) from {len(all_results)} keywords")
+    return True
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 2: GIG DETAILS SCRAPER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Track which gigs have been scraped this session (to avoid re-scraping)
+SCRAPED_GIGS = set()
+
+def load_scraped_gigs_list():
+    """Initialize scraped gigs tracking (FGOS tracks across sessions)."""
+    global SCRAPED_GIGS
+    SCRAPED_GIGS = set()
+    log("📝 Scraped gigs tracking initialized (FGOS manages cross-session state)")
+    return SCRAPED_GIGS
+
+def save_scraped_gig_id(gig_id):
+    """Mark gig as scraped locally + notify FGOS."""
+    global SCRAPED_GIGS
+    SCRAPED_GIGS.add(str(gig_id))
+    fgos_gig_done(gig_id)
+
+def get_gig_id_from_url(url):
+    """Extract gig_id (username_slug) from URL."""
+    import re
+    match = re.search(r'fiverr\.com/([a-z0-9_]+)/([a-z0-9_-]+)', url, re.IGNORECASE)
+    if match:
+        return f"{match.group(1).lower()}_{match.group(2).lower()}"
+    return None
+
+def is_valid_gig_url(url):
+    """Check if URL is a valid gig URL (not agency, category, etc.)."""
+    if not url or 'fiverr.com' not in url:
+        return False
+    
+    # Skip non-gig URLs
+    invalid_patterns = ['/agencies/', '/categories/', '/search/', '/resources/', 
+                       '/help/', '/cp/', '/business/', '/pro/', '/logo-maker/']
+    for pattern in invalid_patterns:
+        if pattern in url.lower():
+            return False
+    
+    # Must match username/gig-slug pattern
+    import re
+    return bool(re.search(r'fiverr\.com/[a-z0-9_]+/[a-z0-9_-]+', url, re.IGNORECASE))
+
+async def scrape_gig_details(page, gig_url):
+    """Visit a gig page and extract ALL detailed seller information."""
+    
+    gig_id = get_gig_id_from_url(gig_url)
+    
+    try:
+        await page.goto(gig_url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(random.uniform(2, 4))
+        
+        # Dismiss any popups
+        await dismiss_popups(page)
+        
+        # Scroll down to load reviews section
+        await page.evaluate('window.scrollTo(0, document.body.scrollHeight / 2)')
+        await asyncio.sleep(1)
+        
+        # Scroll down to trigger lazy loading of all page elements
+        await page.evaluate('window.scrollTo(0, document.body.scrollHeight / 2)')
+        await asyncio.sleep(1)
+        
+        # NOTE: We extract reviews from embedded JSON which is loaded at page load
+        # The JSON contains recent reviews already - no need to click any filter
+        # (Clicking "Most Recent" filter only changes DOM display, not the JSON)
+        
+        # Extract ALL gig details - FIRST try embedded JSON, THEN fall back to DOM
+        gig_data = await page.evaluate('''
+            () => {
+                const data = {
+                    // === SELLER INFO ===
+                    seller_username: '',
+                    seller_display_name: '',
+                    seller_level: '',
+                    seller_rating: '',
+                    total_reviews: '0',
+                    response_time: '',
+                    member_since: '',
+                    seller_country: '',
+                    languages: '',
+                    is_pro_seller: false,
+                    is_choice_seller: false,
+                    seller_description: '',
+                    orders_in_queue: '',
+                    last_delivery: '',
+                    completed_orders: 0,
+                    seller_skills: [],
+                    seller_certifications: [],
+                    seller_education: [],
+                    seller_full_name: '',
+                    seller_joined_date: '',
+                    seller_is_verified: false,
+                    seller_is_on_vacation: false,
+                    seller_hourly_rate: '',
+                    
+                    // === GIG INFO ===
+                    gig_title: '',
+                    gig_description: '',
+                    category_breadcrumb: '',
+                    gig_tags: [],
+                    gig_id: 0,
+                    seller_id: 0,
+                    
+                    // === CATEGORY INFO ===
+                    category_name: '',
+                    category_slug: '',
+                    subcategory_name: '',
+                    subcategory_slug: '',
+                    
+                    // === PRICING (All 3 packages) ===
+                    basic_price: '',
+                    basic_name: '',
+                    basic_delivery_days: '',
+                    basic_revisions: '',
+                    basic_features: [],
+                    
+                    standard_price: '',
+                    standard_name: '',
+                    standard_delivery_days: '',
+                    standard_revisions: '',
+                    standard_features: [],
+                    
+                    premium_price: '',
+                    premium_name: '',
+                    premium_delivery_days: '',
+                    premium_revisions: '',
+                    premium_features: [],
+                    
+                    // === REVIEWS DATA ===
+                    reviews_breakdown: {
+                        five_star: 0,
+                        four_star: 0,
+                        three_star: 0,
+                        two_star: 0,
+                        one_star: 0,
+                        seller_communication: 0,
+                        quality_of_delivery: 0,
+                        value_of_delivery: 0
+                    },
+                    recent_reviews: [],
+                    
+                    // === FAQ ===
+                    faq_items: [],
+                    
+                    // === ADDITIONAL ===
+                    has_video: false,
+                    gallery_images_count: 0,
+                    gallery_items: [],
+                    offers_video_consultation: false,
+                    consultation_description: '',
+                    consultation_pricing: [],
+                    notable_clients: [],
+                    favorites_count: 0,
+                    price_range_low: '',
+                    price_range_high: '',
+                    portfolio_projects_count: 0,
+                    seller_intro_video_url: '',
+                    seller_other_gig_ids: [],
+                    gig_description_html: '',
+                    json_extracted: false
+                };
+                
+                // ==========================================
+                // METHOD 1: Extract from embedded JSON data (BEST - most reliable)
+                // Fiverr embeds ALL gig data as JSON in a script tag
+                // ==========================================
+                try {
+                    const scripts = document.querySelectorAll('script');
+                    let gigData = null;
+                    
+                    for (const script of scripts) {
+                        const text = script.textContent || '';
+                        
+                        // Look for the main gig data object that contains all info
+                        if (text.includes('"general":{"gigId"') || text.includes('{"abTestsCalculations"')) {
+                            try {
+                                // Find the start of the JSON object
+                                let jsonStart = text.indexOf('{"abTestsCalculations"');
+                                if (jsonStart === -1) {
+                                    jsonStart = text.indexOf('{"general":{"gigId"');
+                                }
+                                
+                                if (jsonStart !== -1) {
+                                    // Find matching closing brace by counting
+                                    let braceCount = 0;
+                                    let jsonEnd = jsonStart;
+                                    for (let i = jsonStart; i < text.length; i++) {
+                                        if (text[i] === '{') braceCount++;
+                                        if (text[i] === '}') braceCount--;
+                                        if (braceCount === 0) {
+                                            jsonEnd = i + 1;
+                                            break;
+                                        }
+                                    }
+                                    
+                                    const jsonStr = text.substring(jsonStart, jsonEnd);
+                                    gigData = JSON.parse(jsonStr);
+                                    break;
+                                }
+                            } catch (e) {
+                                // JSON parse failed, will try DOM method
+                            }
+                        }
+                    }
+                    
+                    // If we found the JSON data, extract EVERYTHING from it
+                    if (gigData) {
+                        data.json_extracted = true;
+                        
+                        // === GENERAL INFO ===
+                        if (gigData.general) {
+                            data.gig_id = gigData.general.gigId || 0;
+                            data.gig_title = gigData.general.gigTitle || '';
+                            data.category_name = gigData.general.categoryName || '';
+                            data.category_slug = gigData.general.categorySlug || '';
+                            data.subcategory_name = gigData.general.subCategoryName || '';
+                            data.subcategory_slug = gigData.general.subCategorySlug || '';
+                            data.seller_id = gigData.general.sellerId || 0;
+                            data.is_pro_seller = gigData.general.isPro || false;
+                            
+                            // Build category breadcrumb from parts
+                            const parts = [data.category_name, data.subcategory_name].filter(p => p);
+                            data.category_breadcrumb = parts.join(' > ');
+                        }
+                        
+                        // === OVERVIEW SECTION ===
+                        if (gigData.overview) {
+                            if (gigData.overview.gig) {
+                                data.seller_rating = String(gigData.overview.gig.rating || '');
+                                data.total_reviews = String(gigData.overview.gig.ratingsCount || '0');
+                                data.orders_in_queue = String(gigData.overview.gig.ordersInQueue || '');
+                            }
+                            if (gigData.overview.seller) {
+                                data.seller_username = gigData.overview.seller.username || '';
+                                data.seller_country = gigData.overview.seller.countryCode || '';
+                                data.is_pro_seller = gigData.overview.seller.isPro || data.is_pro_seller;
+                                
+                                // Convert achievement number to level text
+                                // achievement: 0=New, 1=Level 1, 2=Level 2, 3=Top Rated
+                                const achievement = gigData.overview.seller.achievement || 0;
+                                const levelMap = {0: 'New Seller', 1: 'Level 1', 2: 'Level 2', 3: 'Top Rated'};
+                                data.seller_level = levelMap[achievement] || '';
+                                
+                                // Languages from overview
+                                if (gigData.overview.seller.proficientLanguages) {
+                                    const langs = gigData.overview.seller.proficientLanguages.map(l => l.name.toUpperCase());
+                                    data.languages = langs.join(', ');
+                                }
+                            }
+                        }
+                        
+                        // === SELLER CARD ===
+                        if (gigData.sellerCard) {
+                            data.seller_description = gigData.sellerCard.description || '';
+                            data.response_time = gigData.sellerCard.responseTime ? 
+                                String(gigData.sellerCard.responseTime) + ' hours' : '';
+                            data.seller_rating = data.seller_rating || String(gigData.sellerCard.rating || '');
+                            data.total_reviews = data.total_reviews || String(gigData.sellerCard.ratingsCount || '0');
+                            data.seller_country = data.seller_country || gigData.sellerCard.countryCode || '';
+                            
+                            // Member since (convert timestamp to date)
+                            if (gigData.sellerCard.memberSince) {
+                                const date = new Date(gigData.sellerCard.memberSince * 1000);
+                                data.member_since = date.toISOString().split('T')[0];
+                            }
+                        }
+                        
+                        // === SELLER DATA (more details) ===
+                        if (gigData.seller) {
+                            if (gigData.seller.user && gigData.seller.user.profile) {
+                                data.seller_display_name = gigData.seller.user.profile.displayName || '';
+                            }
+                            if (gigData.seller.user) {
+                                data.seller_username = data.seller_username || gigData.seller.user.name || '';
+                                data.seller_full_name = gigData.seller.user.fullName || '';
+                                if (gigData.seller.user.joinedAt) {
+                                    const joinDate = new Date(gigData.seller.user.joinedAt * 1000);
+                                    data.seller_joined_date = joinDate.toISOString().split('T')[0];
+                                }
+                            }
+                            
+                            // Seller level from seller object (more accurate)
+                            if (gigData.seller.sellerLevel) {
+                                const levelTextMap = {
+                                    'LEVEL_ONE': 'Level 1',
+                                    'LEVEL_TWO': 'Level 2',
+                                    'TOP_RATED': 'Top Rated'
+                                };
+                                data.seller_level = levelTextMap[gigData.seller.sellerLevel] || data.seller_level;
+                            }
+                            
+                            data.completed_orders = gigData.seller.completedOrdersCount || 0;
+                            data.seller_is_verified = gigData.seller.isVerified || false;
+                            data.seller_is_on_vacation = gigData.seller.isOnVacation || false;
+                            
+                            // Hourly rate
+                            if (gigData.seller.hourlyRate) {
+                                data.seller_hourly_rate = '$' + (gigData.seller.hourlyRate.priceInCents / 100).toFixed(0);
+                            }
+                            
+                            // Skills with level info
+                            if (gigData.seller.activeStructuredSkills) {
+                                data.seller_skills = gigData.seller.activeStructuredSkills.map(s => ({
+                                    name: s.name,
+                                    level: s.level
+                                }));
+                            }
+                            
+                            // Certifications
+                            if (gigData.seller.certifications) {
+                                data.seller_certifications = gigData.seller.certifications.map(c => ({
+                                    name: c.certificationName,
+                                    from: c.receivedFrom,
+                                    year: c.year
+                                }));
+                            }
+                            
+                            // Education
+                            if (gigData.seller.activeEducations) {
+                                data.seller_education = gigData.seller.activeEducations.map(e => ({
+                                    title: e.title,
+                                    school: e.school,
+                                    country: e.countryCode,
+                                    major: e.major,
+                                    year: e.graduationYear
+                                }));
+                            }
+                        }
+                        
+                        // === PACKAGES (Full pricing info) ===
+                        if (gigData.packages && gigData.packages.packageList) {
+                            const pkgList = gigData.packages.packageList;
+                            
+                            if (pkgList[0]) {
+                                data.basic_name = pkgList[0].title || 'Basic';
+                                data.basic_price = '$' + (pkgList[0].price / 100).toFixed(0);
+                                data.basic_delivery_days = Math.ceil(pkgList[0].duration / 24) + ' days';
+                                data.basic_revisions = pkgList[0].revisions?.value || 0;
+                                data.basic_features = (pkgList[0].features || [])
+                                    .filter(f => f.included)
+                                    .map(f => f.label || f.name);
+                            }
+                            if (pkgList[1]) {
+                                data.standard_name = pkgList[1].title || 'Standard';
+                                data.standard_price = '$' + (pkgList[1].price / 100).toFixed(0);
+                                data.standard_delivery_days = Math.ceil(pkgList[1].duration / 24) + ' days';
+                                data.standard_revisions = pkgList[1].revisions?.value || 0;
+                                data.standard_features = (pkgList[1].features || [])
+                                    .filter(f => f.included)
+                                    .map(f => f.label || f.name);
+                            }
+                            if (pkgList[2]) {
+                                data.premium_name = pkgList[2].title || 'Premium';
+                                data.premium_price = '$' + (pkgList[2].price / 100).toFixed(0);
+                                data.premium_delivery_days = Math.ceil(pkgList[2].duration / 24) + ' days';
+                                data.premium_revisions = pkgList[2].revisions?.value || 0;
+                                data.premium_features = (pkgList[2].features || [])
+                                    .filter(f => f.included)
+                                    .map(f => f.label || f.name);
+                            }
+                        }
+                        
+                        // === REVIEWS BREAKDOWN (from reviews object) ===
+                        if (gigData.reviews) {
+                            data.total_reviews = String(gigData.reviews.total_count || data.total_reviews);
+                            data.seller_rating = String(gigData.reviews.average_valuation || data.seller_rating);
+                            
+                            // Star breakdown from array
+                            if (gigData.reviews.breakdown) {
+                                for (const item of gigData.reviews.breakdown) {
+                                    switch(item.average_valuation_value) {
+                                        case 5: data.reviews_breakdown.five_star = item.count; break;
+                                        case 4: data.reviews_breakdown.four_star = item.count; break;
+                                        case 3: data.reviews_breakdown.three_star = item.count; break;
+                                        case 2: data.reviews_breakdown.two_star = item.count; break;
+                                        case 1: data.reviews_breakdown.one_star = item.count; break;
+                                    }
+                                }
+                            }
+                            
+                            // Quality metrics from star_summary
+                            if (gigData.reviews.star_summary) {
+                                data.reviews_breakdown.seller_communication = gigData.reviews.star_summary.communication_valuation || 0;
+                                data.reviews_breakdown.quality_of_delivery = gigData.reviews.star_summary.quality_of_delivery_valuation || 0;
+                                data.reviews_breakdown.value_of_delivery = gigData.reviews.star_summary.value_for_money_valuation || 0;
+                            }
+                            
+                            // Recent reviews from JSON
+                            if (gigData.reviews.reviews) {
+                                data.recent_reviews = gigData.reviews.reviews.slice(0, 10).map(r => ({
+                                    buyer_name: r.username || '',
+                                    buyer_country: r.reviewer_country || '',
+                                    review_rating: String(r.value || ''),
+                                    review_text: (r.comment || '').substring(0, 1000),
+                                    review_date: r.created_at || '',
+                                    order_price: r.order_price_range_usd || '',
+                                    order_duration: r.order_duration_en || '',
+                                    is_repeat_client: r.repeat_buyer || false,
+                                    seller_response: (r.seller_response?.comment || '').substring(0, 500)
+                                }));
+                            }
+                        }
+                        
+                        // === FAQ ===
+                        if (gigData.faq && gigData.faq.questionsAndAnswers) {
+                            data.faq_items = gigData.faq.questionsAndAnswers.map(qa => ({
+                                question: qa.question,
+                                answer: qa.answer
+                            }));
+                        }
+                        
+                        // === TAGS ===
+                        if (gigData.tags && gigData.tags.tagsGigList) {
+                            data.gig_tags = gigData.tags.tagsGigList.map(t => t.name);
+                        }
+                        
+                        // === GALLERY ===
+                        if (gigData.gallery && gigData.gallery.slides) {
+                            data.gallery_images_count = gigData.gallery.slides.length;
+                            data.has_video = gigData.gallery.slides.some(s => s.slide?.typeVideo);
+                        }
+                        
+                        // === NOTABLE CLIENTS ===
+                        if (gigData.notableClients) {
+                            data.notable_clients = gigData.notableClients.map(c => ({
+                                name: c.name,
+                                website: c.website,
+                                industry: c.enriched_details?.industry || ''
+                            }));
+                        }
+                        
+                        // === DESCRIPTION from gig description ===
+                        // Helper function to convert HTML to formatted text (preserves structure)
+                        const htmlToText = (html) => {
+                            if (!html) return '';
+                            const temp = document.createElement('div');
+                            temp.innerHTML = html;
+                            // Convert <br> to newlines
+                            temp.querySelectorAll('br').forEach(br => br.replaceWith('\\n'));
+                            // Convert <p> to paragraphs (double newline after)
+                            temp.querySelectorAll('p').forEach(p => { p.innerHTML = p.innerHTML + '\\n\\n'; });
+                            // Convert <li> to bullet points
+                            temp.querySelectorAll('li').forEach(li => { li.innerHTML = '• ' + li.innerHTML + '\\n'; });
+                            // Get text and clean up multiple newlines
+                            let text = temp.textContent || temp.innerText || '';
+                            text = text.replace(/\\n{3,}/g, '\\n\\n');
+                            text = text.replace(/&nbsp;/g, ' ');
+                            text = text.replace(/&amp;/g, '&');
+                            return text.trim();
+                        };
+                        
+                        if (gigData.description && gigData.description.content) {
+                            // Save BOTH raw HTML and formatted text versions
+                            data.gig_description_html = gigData.description.content;
+                            data.gig_description = htmlToText(gigData.description.content).substring(0, 3000);
+                        }
+                        
+                        // === CHOICE ELIGIBILITY ===
+                        if (gigData.choiceEligibilities && gigData.choiceEligibilities.length > 0) {
+                            data.is_choice_seller = true;
+                        }
+                        
+                        // === TOP NAV - Favorites count ===
+                        if (gigData.topNav && gigData.topNav.gigCollectedCount) {
+                            data.favorites_count = gigData.topNav.gigCollectedCount;
+                        }
+                        
+                        // === SEO DATA - Price range ===
+                        if (gigData.seo && gigData.seo.schemaMarkup && gigData.seo.schemaMarkup.gigOffers) {
+                            data.price_range_low = gigData.seo.schemaMarkup.gigOffers.lowPrice;
+                            data.price_range_high = gigData.seo.schemaMarkup.gigOffers.highPrice;
+                        }
+                        
+                        // === PORTFOLIO ===
+                        if (gigData.portfolio) {
+                            data.portfolio_projects_count = gigData.portfolio.projectsCount || 0;
+                        }
+                        
+                        // === SELLER INTRO VIDEO ===
+                        if (gigData.seller && gigData.seller.introVideo) {
+                            data.seller_intro_video_url = gigData.seller.introVideo.url || '';
+                        }
+                        
+                        // === CONSULTATION DATA ===
+                        if (gigData.consultationData) {
+                            data.offers_video_consultation = true;
+                            data.consultation_description = gigData.consultationData.description || '';
+                            if (gigData.consultationData.pricing) {
+                                data.consultation_pricing = gigData.consultationData.pricing.map(p => ({
+                                    minutes: p.session_minutes,
+                                    price: '$' + p.price
+                                }));
+                            }
+                        }
+                        
+                        // === OTHER GIGS BY SELLER ===
+                        if (gigData.otherGigs && gigData.otherGigs.gigIds) {
+                            data.seller_other_gig_ids = gigData.otherGigs.gigIds;
+                        }
+                        
+                        // === GALLERY - More details ===
+                        if (gigData.gallery && gigData.gallery.slides) {
+                            data.gallery_items = gigData.gallery.slides.map(s => ({
+                                type: s.slide?.typeVideo ? 'video' : 'image',
+                                src: s.slide?.src,
+                                is_work_sample: s.slide?.isWorkSample || false
+                            }));
+                        }
+                    }
+                } catch (jsonError) {
+                    // JSON extraction failed, continue to DOM fallback
+                }
+                
+                // ==========================================
+                // METHOD 2: DOM FALLBACK (only fill in missing data)
+                // Only extract via DOM if JSON extraction didn't get the value
+                // ==========================================
+                
+                // Username from URL (always reliable)
+                if (!data.seller_username) {
+                    const urlMatch = window.location.pathname.match(/\\/([a-z0-9_]+)\\//i);
+                    if (urlMatch) data.seller_username = urlMatch[1];
+                }
+                
+                // Seller display name - multiple selectors
+                if (!data.seller_display_name) {
+                    const nameSelectors = [
+                        '.seller-card a[href*="/"] b',
+                        '[class*="seller-name"]',
+                        '.username-line a',
+                        '[data-testid="seller-name"]',
+                        '.seller-overview a.seller-link'
+                    ];
+                    for (const sel of nameSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el && el.innerText.trim()) {
+                            data.seller_display_name = el.innerText.trim();
+                            break;
+                        }
+                    }
+                }
+                
+                // Seller level badge (only if not already from JSON)
+                if (!data.seller_level) {
+                    const levelSelectors = [
+                        '[class*="seller-level"]',
+                        '[class*="level-badge"]',
+                        '.level',
+                        '[class*="top-rated"]',
+                        '[data-testid*="level"]'
+                    ];
+                    for (const sel of levelSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el && el.innerText.trim()) {
+                            const text = el.innerText.trim().toLowerCase();
+                            if (text.includes('top rated plus') || text.includes('top rated') || 
+                                text.includes('level') || text.includes('new seller')) {
+                                data.seller_level = el.innerText.trim();
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Pro seller / Choice badges (add to existing if found)
+                const allBadges = document.querySelectorAll('[class*="badge"], [class*="pro"], [class*="choice"]');
+                allBadges.forEach(badge => {
+                    try {
+                        const text = String(badge.innerText || '').toLowerCase();
+                        const className = String(badge.className?.baseVal || badge.className || '').toLowerCase();
+                        if (text.includes('pro') || className.includes('pro')) {
+                            data.is_pro_seller = true;
+                        }
+                        if (text.includes('choice') || className.includes('choice')) {
+                            data.is_choice_seller = true;
+                        }
+                    } catch(e) {}
+                });
+                
+                // Rating (only if not from JSON)
+                if (!data.seller_rating) {
+                    const ratingSelectors = [
+                        '[class*="rating"] b',
+                        '[class*="rating-score"]',
+                        '[data-testid*="rating"]',
+                        '.gig-overview b'
+                    ];
+                    for (const sel of ratingSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                            const text = el.innerText.trim();
+                            if (/^[0-5](\\.[0-9])?$/.test(text)) {
+                                data.seller_rating = text;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Total reviews count
+                const reviewCountSelectors = [
+                    '[class*="ratings-count"]',
+                    '[class*="reviews-count"]',
+                    '[href*="#reviews"]',
+                    'a[href*="reviews"]'
+                ];
+                for (const sel of reviewCountSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        const match = el.innerText.match(/([\\d,]+)/);
+                        if (match) {
+                            data.total_reviews = match[1].replace(/,/g, '');
+                            break;
+                        }
+                    }
+                }
+                
+                // Seller stats - only fill in if not from JSON
+                const statElements = document.querySelectorAll(
+                    '[class*="seller-stats"] li, .seller-card li, [class*="stat"], ' +
+                    '[class*="seller-overview"] li, [class*="user-stats"] li'
+                );
+                statElements.forEach(li => {
+                    if (!li || !li.innerText) return;
+                    const text = (li.innerText || '').toLowerCase();
+                    const fullText = (li.innerText || '').trim();
+                    
+                    if (!data.response_time && text.includes('response')) {
+                        data.response_time = fullText.replace(/response\\s*(time)?:?/i, '').trim();
+                    }
+                    if (!data.seller_country && text.includes('from') && (text.includes('country') || text.length < 50)) {
+                        data.seller_country = fullText.replace(/from:?/i, '').trim();
+                    }
+                    if (!data.member_since && (text.includes('member since') || text.includes('joined'))) {
+                        data.member_since = fullText.replace(/member since:?|joined:?/i, '').trim();
+                    }
+                    if (text.includes('last delivery') || text.includes('avg. response')) {
+                        data.last_delivery = fullText;
+                    }
+                    if (!data.orders_in_queue && (text.includes('queue') || text.includes('orders in'))) {
+                        const match = fullText.match(/\\d+/);
+                        if (match) data.orders_in_queue = match[0];
+                    }
+                });
+                
+                // Languages (only if not from JSON)
+                if (!data.languages) {
+                    const langEl = document.querySelector('[class*="languages"], .languages, [data-testid*="language"]');
+                    if (langEl) data.languages = langEl.innerText.trim();
+                }
+                
+                // Seller description (only if not from JSON)
+                if (!data.seller_description) {
+                    const aboutEl = document.querySelector('[class*="seller-desc"], .seller-description, [class*="about-seller"]');
+                    if (aboutEl) data.seller_description = aboutEl.innerText.substring(0, 2000).trim();
+                }
+                
+                // ==========================================
+                // GIG INFO - DOM FALLBACK
+                // ==========================================
+                
+                // Gig title (only if not from JSON)
+                if (!data.gig_title) {
+                    const titleEl = document.querySelector('h1, [class*="gig-title"]');
+                    if (titleEl) data.gig_title = titleEl.innerText.trim();
+                }
+                
+                // Gig description (only if not from JSON)
+                if (!data.gig_description) {
+                    const descEl = document.querySelector(
+                        '[class*="description"], .gig-description, ' +
+                        '[data-testid*="description"], [class*="gig-overview"]'
+                    );
+                    if (descEl) data.gig_description = descEl.innerText.trim();
+                }
+                
+                // Category breadcrumb (only if not from JSON)
+                if (!data.category_breadcrumb) {
+                    const breadcrumbEl = document.querySelector('[class*="breadcrumb"], nav[aria-label*="breadcrumb"]');
+                    if (breadcrumbEl) data.category_breadcrumb = breadcrumbEl.innerText.replace(/[\\n\\r]+/g, ' > ').trim();
+                }
+                
+                // Tags (only if not from JSON)
+                if (!data.gig_tags || data.gig_tags.length === 0) {
+                    const tagEls = document.querySelectorAll(
+                        '[class*="gig-tags"] a, [class*="metadata"] a, ' +
+                        '.tags a, [href*="/search/gigs?query="]'
+                    );
+                    data.gig_tags = Array.from(tagEls)
+                        .map(t => (t.innerText || '').trim())
+                        .filter(t => t && t.length < 50)
+                        .slice(0, 15);
+                }
+                
+                // ==========================================
+                // PRICING - DOM FALLBACK (only if not from JSON)
+                // ==========================================
+                
+                // Only extract via DOM if we don't have package data from JSON
+                if (!data.basic_price) {
+                    // Try to find package tabs/columns
+                    const packageContainers = document.querySelectorAll(
+                        '[class*="package"], [class*="tier"], ' +
+                        '[role="tabpanel"], [class*="pricing"]'
+                );
+                
+                // Look for prices in the packages section
+                const priceElements = document.querySelectorAll('[class*="price"]');
+                const prices = [];
+                priceElements.forEach(el => {
+                    if (!el || !el.innerText) return;
+                    const text = (el.innerText || '').trim();
+                    if (/^\\$[\\d,]+/.test(text) || /US\\$[\\d,]+/.test(text)) {
+                        prices.push(text.replace(/US/g, '').trim());
+                    }
+                });
+                
+                    if (prices.length >= 1) data.basic_price = prices[0];
+                    if (prices.length >= 2) data.standard_price = prices[1];
+                    if (prices.length >= 3) data.premium_price = prices[2];
+                    
+                    // Extract delivery times
+                    const deliveryEls = document.querySelectorAll('[class*="delivery"]');
+                    const deliveryTimes = [];
+                    deliveryEls.forEach(el => {
+                        if (!el || !el.innerText) return;
+                        const text = (el.innerText || '').trim();
+                        if (text.match(/\\d+\\s*(day|hour)/i)) {
+                            deliveryTimes.push(text);
+                        }
+                    });
+                    if (deliveryTimes.length >= 1) data.basic_delivery_days = deliveryTimes[0];
+                    if (deliveryTimes.length >= 2) data.standard_delivery_days = deliveryTimes[1];
+                    if (deliveryTimes.length >= 3) data.premium_delivery_days = deliveryTimes[2];
+                    
+                    // Package names (Basic, Standard, Premium or custom names)
+                    const packageHeaders = document.querySelectorAll('[class*="package-title"], [class*="tier-name"]');
+                    if (packageHeaders.length >= 1) data.basic_name = packageHeaders[0]?.innerText.trim() || 'Basic';
+                    if (packageHeaders.length >= 2) data.standard_name = packageHeaders[1]?.innerText.trim() || 'Standard';
+                    if (packageHeaders.length >= 3) data.premium_name = packageHeaders[2]?.innerText.trim() || 'Premium';
+                } // End of pricing DOM fallback
+                
+                // ==========================================
+                // REVIEWS - DOM FALLBACK (only if no data from JSON)
+                // ==========================================
+                
+                // Rating breakdown (5-star, 4-star, etc.) - DOM fallback
+                if (data.reviews_breakdown.five_star === 0) {
+                    // Try the stars-counters table first (most reliable for breakdown)
+                    const starsTable = document.querySelector('.stars-counters, table.stars-counters');
+                    if (starsTable) {
+                        const rows = starsTable.querySelectorAll('tr');
+                        rows.forEach(row => {
+                            const text = row.innerText || '';
+                            const countMatch = text.match(/\\((\\d[\\d,]*)\\)/);
+                            const count = countMatch ? parseInt(countMatch[1].replace(/,/g, '')) : 0;
+                            
+                            if (text.includes('5 Star')) data.reviews_breakdown.five_star = count;
+                            else if (text.includes('4 Star')) data.reviews_breakdown.four_star = count;
+                            else if (text.includes('3 Star')) data.reviews_breakdown.three_star = count;
+                            else if (text.includes('2 Star')) data.reviews_breakdown.two_star = count;
+                            else if (text.includes('1 Star')) data.reviews_breakdown.one_star = count;
+                        });
+                    }
+                    
+                    // Fallback to other selectors
+                    if (data.reviews_breakdown.five_star === 0) {
+                        const breakdownEls = document.querySelectorAll('[class*="breakdown"] [class*="bar"], [class*="rating-breakdown"] tr');
+                        breakdownEls.forEach(el => {
+                            const text = el.innerText;
+                            const countMatch = text.match(/(\\d+)/);
+                            if (countMatch) {
+                                const count = parseInt(countMatch[1]);
+                                if (text.includes('5')) data.reviews_breakdown.five_star = count;
+                                else if (text.includes('4')) data.reviews_breakdown.four_star = count;
+                                else if (text.includes('3')) data.reviews_breakdown.three_star = count;
+                                else if (text.includes('2') && !text.includes('12')) data.reviews_breakdown.two_star = count;
+                                else if (text.includes('1') && !text.includes('10') && !text.includes('11')) data.reviews_breakdown.one_star = count;
+                            }
+                        });
+                    }
+                }
+                
+                // Extract individual reviews - DOM fallback (only if no reviews from JSON)
+                if (!data.recent_reviews || data.recent_reviews.length === 0) {
+                    const reviewItems = document.querySelectorAll(
+                        '[class*="review-item"], [class*="review-container"], ' +
+                        '[class*="carousel-review-item"], [data-testid*="review"]'
+                    );
+                    
+                    const reviews = [];
+                    reviewItems.forEach((item, index) => {
+                        if (index >= 10) return; // Max 10 reviews
+                        
+                        const review = {
+                            buyer_name: '',
+                            buyer_country: '',
+                            review_rating: '',
+                            review_text: '',
+                            review_date: '',
+                            order_price: '',
+                            order_duration: '',
+                            is_repeat_client: false,
+                            seller_response: ''
+                        };
+                        
+                        // Buyer name - look for username text
+                        const nameEl = item.querySelector('h6, p[data-track-tag="text"], [class*="username"], figcaption + p');
+                        if (nameEl && nameEl.innerText) {
+                            const name = (nameEl.innerText || '').trim();
+                            if (name && name.length < 50 && !name.includes('Seller')) {
+                                review.buyer_name = name;
+                            }
+                        }
+                    
+                    // Buyer country - look for flag + country text
+                    const countryEl = item.querySelector('.country p, [class*="country"] p, img[class*="flag"] + p');
+                    if (countryEl && countryEl.innerText) review.buyer_country = (countryEl.innerText || '').trim();
+                    
+                    // Is repeat client?
+                    const repeatText = item.innerText || '';
+                    if (repeatText.toLowerCase().includes('repeat client')) {
+                        review.is_repeat_client = true;
+                    }
+                    
+                    // Rating - find rating-score element
+                    const ratingEl = item.querySelector('.rating-score, [class*="rating-score"], strong[class*="rating"]');
+                    if (ratingEl && ratingEl.innerText) {
+                        const match = (ratingEl.innerText || '').match(/[0-5](\\.\\d)?/);
+                        if (match) review.review_rating = match[0];
+                    }
+                    
+                    // Review text - find the review description
+                    const textEl = item.querySelector('.review-description p, [class*="review-description"] p, .reliable-review-description p');
+                    if (textEl && textEl.innerText) {
+                        let text = (textEl.innerText || '').trim();
+                        // Remove "See more" text
+                        text = text.replace(/See more$/i, '').trim();
+                        review.review_text = text.substring(0, 1000);
+                    }
+                    
+                        // Review date - find time element
+                        const dateEl = item.querySelector('time, [class*="date"]');
+                        if (dateEl && dateEl.innerText) review.review_date = (dateEl.innerText || '').trim();
+                        
+                        // Order price range - look for price text
+                        const priceEls = item.querySelectorAll('p[data-track-tag="text"]');
+                        priceEls.forEach(el => {
+                            const text = el.innerText || '';
+                            if (text.includes('$')) {
+                                review.order_price = text.trim();
+                            }
+                        });
+                        
+                        // Order duration - look for duration text like "7 days", "4 weeks"
+                        const allTexts = item.querySelectorAll('p[data-track-tag="text"]');
+                        allTexts.forEach(el => {
+                            const text = el.innerText || '';
+                            if (text.match(/\\d+\\s*(day|week|month)/i)) {
+                                review.order_duration = text.trim();
+                            }
+                        });
+                        
+                        // Seller response - check for seller comment section
+                        const sellerResponseEl = item.querySelector('[class*="seller_comment"] .review-description p, article .review-description p');
+                        if (sellerResponseEl && sellerResponseEl.innerText) {
+                            review.seller_response = (sellerResponseEl.innerText || '').substring(0, 500).trim();
+                        }
+                        
+                        if (review.buyer_name || review.review_text) {
+                            reviews.push(review);
+                        }
+                    });
+                    data.recent_reviews = reviews;
+                } // End of reviews DOM fallback
+                
+                // ==========================================
+                // FAQ - DOM FALLBACK (only if not from JSON)
+                // ==========================================
+                if (!data.faq_items || data.faq_items.length === 0) {
+                    const faqItems = document.querySelectorAll('[class*="faq-collapsible"], [class*="faq"] [class*="question"], [class*="faq-item"]');
+                    const faqs = [];
+                    faqItems.forEach((item, index) => {
+                        if (index >= 10) return;
+                        const q = item.querySelector('[class*="title"], [class*="question"], summary, button')?.innerText.trim();
+                        const a = item.querySelector('[class*="content"], [class*="answer"], p')?.innerText.trim();
+                        if (q) faqs.push({ question: q.substring(0, 200), answer: (a || '').substring(0, 500) });
+                    });
+                    data.faq_items = faqs;
+                }
+                
+                // ==========================================
+                // ADDITIONAL INFO (always check DOM for these)
+                // ==========================================
+                
+                // Has video (add to existing if found)
+                if (!data.has_video) {
+                    data.has_video = !!document.querySelector('video, [class*="video"], [class*="player"]');
+                }
+                
+                // Gallery images count (only if not from JSON)
+                if (!data.gallery_images_count) {
+                    data.gallery_images_count = document.querySelectorAll('[class*="gallery"] img, [class*="carousel"] img').length;
+                }
+                
+                // Video consultation
+                const consultText = document.body.innerText.toLowerCase();
+                data.offers_video_consultation = consultText.includes('video consultation') || consultText.includes('zoom call');
+                
+                return data;
+            }
+        ''')
+        
+        # Add metadata
+        gig_data['url'] = gig_url
+        gig_data['gig_id'] = gig_data.get('gig_id') or gig_id
+        gig_data['scraped_at'] = datetime.now().isoformat()
+        gig_data['ip_address'] = SESSION_IP or 'Unknown'
+        gig_data['scrape_country'] = SESSION_COUNTRY or 'Unknown'
+        
+        # Helper to safely convert list items to strings
+        def safe_join(items, sep=', '):
+            """Join list items, converting dicts to strings if needed."""
+            if not items:
+                return ''
+            result = []
+            for item in items:
+                if isinstance(item, dict):
+                    # For skill dicts like {name: "X", level: "Y"}, extract name
+                    result.append(item.get('name', item.get('label', str(item))))
+                elif isinstance(item, str):
+                    result.append(item)
+                else:
+                    result.append(str(item))
+            return sep.join(result)
+        
+        # Convert lists to strings for CSV compatibility
+        if isinstance(gig_data.get('gig_tags'), list):
+            gig_data['gig_tags'] = safe_join(gig_data['gig_tags'])
+        if isinstance(gig_data.get('basic_features'), list):
+            gig_data['basic_features'] = safe_join(gig_data['basic_features'])
+        if isinstance(gig_data.get('standard_features'), list):
+            gig_data['standard_features'] = safe_join(gig_data['standard_features'])
+        if isinstance(gig_data.get('premium_features'), list):
+            gig_data['premium_features'] = safe_join(gig_data['premium_features'])
+        if isinstance(gig_data.get('seller_skills'), list):
+            gig_data['seller_skills'] = safe_join(gig_data['seller_skills'])
+        if isinstance(gig_data.get('notable_clients'), list):
+            gig_data['notable_clients_json'] = json.dumps(gig_data['notable_clients'], ensure_ascii=False)
+        
+        # Also store certifications and education as JSON
+        if isinstance(gig_data.get('seller_certifications'), list):
+            gig_data['seller_certifications_json'] = json.dumps(gig_data['seller_certifications'], ensure_ascii=False)
+        if isinstance(gig_data.get('seller_education'), list):
+            gig_data['seller_education_json'] = json.dumps(gig_data['seller_education'], ensure_ascii=False)
+        
+        # Convert reviews breakdown dict to individual fields
+        if isinstance(gig_data.get('reviews_breakdown'), dict):
+            rb = gig_data['reviews_breakdown']
+            gig_data['five_star_count'] = rb.get('five_star', 0)
+            gig_data['four_star_count'] = rb.get('four_star', 0)
+            gig_data['three_star_count'] = rb.get('three_star', 0)
+            gig_data['two_star_count'] = rb.get('two_star', 0)
+            gig_data['one_star_count'] = rb.get('one_star', 0)
+            gig_data['seller_communication_rating'] = rb.get('seller_communication', 0)
+            gig_data['quality_of_delivery_rating'] = rb.get('quality_of_delivery', 0)
+            gig_data['value_of_delivery_rating'] = rb.get('value_of_delivery', 0)
+        
+        # Convert recent_reviews to JSON string for storage
+        if isinstance(gig_data.get('recent_reviews'), list):
+            gig_data['recent_reviews_json'] = json.dumps(gig_data['recent_reviews'], ensure_ascii=False)
+            gig_data['reviews_scraped_count'] = len(gig_data['recent_reviews'])
+        
+        # Convert FAQ to JSON string
+        if isinstance(gig_data.get('faq_items'), list):
+            gig_data['faq_json'] = json.dumps(gig_data['faq_items'], ensure_ascii=False)
+            gig_data['faq_count'] = len(gig_data['faq_items'])
+        
+        return gig_data
+        
+    except Exception as e:
+        log(f"   ⚠️ Error scraping gig: {e}")
+        return None
+
+def save_gig_details_to_fgos(gig_data):
+    """Save individual gig details to FGOS."""
+    if not gig_data:
+        return False
+    
+    gig_id = str(gig_data.get('gig_id', 'unknown'))
+    ok = fgos_ingest_gig_details([gig_data])
+    
+    if ok:
+        log(f"      💾 Sent to FGOS: {gig_id[:40]}...")
+        save_scraped_gig_id(gig_id)
+    else:
+        log(f"      ❌ Failed to send to FGOS!")
+    
+    return ok
+
+def save_gig_details_batch(gig_list):
+    """Save batch of gig details to FGOS."""
+    if not gig_list:
+        return False
+    
+    ok = fgos_ingest_gig_details(gig_list)
+    
+    if ok:
+        log(f"✅ Sent batch of {len(gig_list)} gig details to FGOS")
+        # Mark each gig as done
+        for gig_data in gig_list:
+            gig_id = str(gig_data.get('gig_id', ''))
+            if gig_id:
+                save_scraped_gig_id(gig_id)
+    
+    return ok
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 2: ONE BROWSER, MULTIPLE TABS (SAFE & EFFICIENT!)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Thread-safe lock for SCRAPED_GIGS set
+SCRAPED_GIGS_LOCK = _threading.Lock()
+
+async def tab_worker(tab_id: int, page, gig_queue: asyncio.Queue, results: list, results_lock: asyncio.Lock, stop_signal: dict, failed_gigs: dict):
+    """
+    Tab worker that pulls gigs from shared queue.
+    When tab finishes one gig, it grabs the next available from queue.
+    If stop_signal is set, puts current gig back and stops.
+    Tracks failed gigs to avoid infinite retry loops.
+    """
+    tab_name = f"📑 Tab-{tab_id}"
+    gigs_done = 0
+    current_gig = None  # Track current gig so we can put it back if needed
+    
+    while True:
+        # Check stop signal
+        if stop_signal.get('stop'):
+            break
+            
+        try:
+            # Get next gig from queue (non-blocking check)
+            current_gig = gig_queue.get_nowait()
+            gig_index, gig_url = current_gig
+        except asyncio.QueueEmpty:
+            # No more gigs in this batch
+            current_gig = None
+            break
+        
+        if CONTROL['quit']:
+            # Put gig back if quitting
+            await gig_queue.put(current_gig)
+            current_gig = None
+            break
+        
+        gig_id = get_gig_id_from_url(gig_url)
+        
+        # Skip if already scraped
+        with SCRAPED_GIGS_LOCK:
+            if gig_id in SCRAPED_GIGS:
+                current_gig = None
+                continue
+        
+        # Check if this gig failed too many times (prevent infinite loop)
+        fail_count = failed_gigs.get(gig_id, 0)
+        if fail_count >= 3:
+            log(f"{tab_name} ⏭️ #{gig_index} failed 3x, skipping")
+            with SCRAPED_GIGS_LOCK:
+                SCRAPED_GIGS.add(str(gig_id))  # Mark as done to avoid re-claiming
+            current_gig = None
+            continue
+        
+        try:
+            gig_data = await scrape_gig_details(page, gig_url)
+            
+            # Check stop signal after scrape (another tab may have hit CAPTCHA)
+            if stop_signal.get('stop'):
+                # Put gig back - we don't know if scrape was clean
+                await gig_queue.put(current_gig)
+                current_gig = None
+                break
+            
+            # CAPTCHA check
+            if await detect_captcha(page):
+                log(f"{tab_name} 🛑 CAPTCHA at #{gig_index}!")
+                # Signal ALL tabs to stop
+                stop_signal['stop'] = True
+                # Put gig back in queue
+                await gig_queue.put(current_gig)
+                current_gig = None
+                return 'captcha'
+            
+            # Success! Mark as scraped
+            with SCRAPED_GIGS_LOCK:
+                SCRAPED_GIGS.add(str(gig_id))
+            
+            if gig_data and gig_data.get('gig_title'):
+                async with results_lock:
+                    results.append(gig_data)
+                title = gig_data.get('gig_title', '')[:20]
+                log(f"{tab_name} ✅ #{gig_index} {title}...")
+                gigs_done += 1
+            else:
+                log(f"{tab_name} ⚠️ #{gig_index} No data")
+            
+            current_gig = None  # Successfully processed
+            
+        except Exception as e:
+            log(f"{tab_name} ❌ #{gig_index} {str(e)[:25]}")
+            # Track failure count
+            failed_gigs[gig_id] = fail_count + 1
+            # Put gig back on error - don't lose it!
+            if current_gig:
+                await gig_queue.put(current_gig)
+                current_gig = None
+        
+        # Small delay
+        await asyncio.sleep(random.uniform(0.5, 1.0))
+    
+    return gigs_done
+
+
+async def run_phase2(page=None, browser=None, context=None):
+    """
+    Phase 2: ONE BROWSER, MULTIPLE TABS - WORK QUEUE MODE (FGOS-driven)
+    
+    How it works:
+    1. Browser claims gigs from FGOS → puts in QUEUE
+    2. All tabs grab from queue (whoever is free takes next)
+    3. If CAPTCHA: reset browser, continue with remaining gigs
+    4. When batch done → send to FGOS → claim next batch
+    
+    NO gigs lost! CAPTCHA just means reset and continue.
+    """
+    
+    BATCH_SIZE = 3
+    MAX_CAPTCHA_RESETS = 5
+    
+    log("\n" + "="*70)
+    log("🚀 PHASE 2: ONE BROWSER, MULTIPLE TABS (FGOS QUEUE)")
+    log("="*70)
+    log(f"📑 Tabs: {NUM_BROWSERS} tabs pulling from shared queue")
+    log(f"📦 Batch: {BATCH_SIZE} gigs per claim cycle")
+    log(f"⚡ Mode: Tabs grab next gig when free")
+    log(f"🛡️  CAPTCHA: Reset browser, continue remaining gigs")
+    log("="*70)
+    
+    send_heartbeat("PHASE2_STARTED", f"1 browser, {NUM_BROWSERS} tabs, FGOS queue mode")
+    
+    # Close original browser
+    if browser:
+        log("🔒 Closing original browser...")
+        try:
+            await browser.__aexit__(None, None, None)
+        except:
+            pass
+    
+    load_scraped_gigs_list()
+    
+    # Main loop
+    total_scraped = 0
+    max_session = 2000
+    total_captcha_resets = 0
+    start_time = asyncio.get_event_loop().time()
+    
+    # Current browser/tabs (will be created/recreated)
+    lightweight_browser = None
+    pages = []
+    
+    while total_scraped < max_session and not CONTROL['quit']:
+        # ═══════════════════════════════════════════════════════════════
+        # CLAIM batch of gigs from FGOS
+        # ═══════════════════════════════════════════════════════════════
+        claimed = []
+        for _ in range(BATCH_SIZE):
+            gig_id, gig_url = fgos_claim_gig()
+            if gig_url is None:
+                break
+            claimed.append((gig_id, gig_url))
+        
+        if not claimed:
+            log("✅ All gigs claimed from FGOS!")
+            break
+        
+        log(f"\n📦 BATCH: {len(claimed)} gigs from FGOS")
+        
+        # Put all gigs in QUEUE
+        gig_queue = asyncio.Queue()
+        for idx, gig in enumerate(claimed):
+            await gig_queue.put((idx, gig[1]))  # (index, url)
+        
+        # Results for this batch
+        batch_results = []
+        results_lock = asyncio.Lock()
+        batch_captcha_resets = 0
+        failed_gigs = {}
+        batch_failed = False
+        
+        # ═══════════════════════════════════════════════════════════════
+        # SCRAPE until queue is EMPTY
+        # ═══════════════════════════════════════════════════════════════
+        while not gig_queue.empty() and not CONTROL['quit']:
+            
+            # Create browser if needed
+            if lightweight_browser is None:
+                log(f"🖥️ Creating browser...")
+                lightweight_browser, first_page = await create_lightweight_browser(1)
+                
+                if not lightweight_browser:
+                    log("❌ Failed to create browser!")
+                    batch_failed = True
+                    break
+                
+                # Create tabs
+                browser_context = first_page.context
+                pages = [first_page]
+                
+                for i in range(NUM_BROWSERS - 1):
+                    try:
+                        new_page = await browser_context.new_page()
+                        pages.append(new_page)
+                    except:
+                        pass
+                
+                log(f"✅ {len(pages)} tabs ready")
+                
+                # Warmup
+                for pg in pages:
+                    try:
+                        await pg.goto("https://www.fiverr.com", timeout=30000)
+                        await dismiss_popups(pg)
+                    except:
+                        pass
+            
+            remaining = gig_queue.qsize()
+            log(f"📋 Queue: {remaining} gigs remaining")
+            
+            stop_signal = {'stop': False}
+            
+            tasks = [
+                tab_worker(i+1, pages[i], gig_queue, batch_results, results_lock, stop_signal, failed_gigs)
+                for i in range(len(pages))
+            ]
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            if 'captcha' in results:
+                batch_captcha_resets += 1
+                total_captcha_resets += 1
+                remaining_in_queue = gig_queue.qsize()
+                
+                log(f"🛑 CAPTCHA! Reset #{batch_captcha_resets}. {remaining_in_queue} gigs still in queue...")
+                
+                if batch_captcha_resets > MAX_CAPTCHA_RESETS:
+                    log(f"❌ Too many CAPTCHAs ({batch_captcha_resets}), skipping remaining...")
+                    batch_failed = True
+                    break
+                
+                if lightweight_browser:
+                    try:
+                        await lightweight_browser.__aexit__(None, None, None)
+                    except:
+                        pass
+                    lightweight_browser = None
+                    pages = []
+                
+                log(f"🔄 Will create new browser and continue with {remaining_in_queue} gigs...")
+                await asyncio.sleep(2)
+                continue
+            
+            break
+        
+        # ═══════════════════════════════════════════════════════════════
+        # SAVE BATCH RESULTS TO FGOS
+        # ═══════════════════════════════════════════════════════════════
+        if batch_results:
+            log(f"💾 Batch complete! Saving {len(batch_results)} gigs to FGOS...")
+            save_gig_details_batch(batch_results)
+            total_scraped += len(batch_results)
+        
+        log(f"📊 Total: {total_scraped} gigs | Resets: {total_captcha_resets}")
+        send_heartbeat("PHASE2_PROGRESS", f"{total_scraped} gigs, {total_captcha_resets} resets")
+        
+        await asyncio.sleep(random.uniform(1, 2))
+    
+    # Cleanup
+    if lightweight_browser:
+        log("\n🔒 Closing browser...")
+        try:
+            await lightweight_browser.__aexit__(None, None, None)
+        except:
+            pass
+    
+    elapsed = asyncio.get_event_loop().time() - start_time
+    
+    log(f"\n" + "="*70)
+    log(f"✅ PHASE 2 COMPLETE!")
+    log(f"="*70)
+    log(f"   📊 Scraped: {total_scraped} gigs")
+    log(f"   🔄 CAPTCHA resets: {total_captcha_resets}")
+    log(f"   ⏱️  Time: {elapsed/60:.1f} min")
+    if elapsed > 0:
+        log(f"   ⚡ Speed: {total_scraped/(elapsed/60):.1f} gigs/min")
+    log(f"="*70)
+    
+    send_heartbeat("PHASE2_COMPLETED", f"{total_scraped} gigs, {total_captcha_resets} resets")
+    
+    return []
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def main():
+    print("""
+    ╔═══════════════════════════════════════════════════════════════════════════╗
+    ║           FIVERR SCRAPER - Phase 1 & Phase 2 Combined (FGOS)             ║
+    ╠═══════════════════════════════════════════════════════════════════════════╣
+    ║  Phase 1: Search keywords → Extract gig URLs from search results         ║
+    ║  Phase 2: Visit each gig → Extract detailed seller info                  ║
+    ╠═══════════════════════════════════════════════════════════════════════════╣
+    ║  Mode:     Fully automated (no keyboard controls)                         ║
+    ║  Backend:  FGOS Fleet API                                                 ║
+    ╚═══════════════════════════════════════════════════════════════════════════╝
+    """)
+    
+    # Start keyboard listener for interactive controls
+    start_keyboard_listener()
+    
+    # ⚡ Register with FGOS and start heartbeat thread
+    send_startup_heartbeat()
+    
+    log(f"🚀 Session ID: {SESSION_TIMESTAMP}")
+    log(f"   VM ID: {VM_ID}")
+    log(f"   FGOS Session: {FGOS_SESSION_ID}")
+    log(f"   FGOS API: {FGOS_API_URL}")
+    log(f"   🕐 UTC Time: {UTC_NOW.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    log(f"   📁 Time Period: {SESSION_PERIOD} (data goes to {DATA_FOLDER}/)")
+    
+    # Setup VPN with random location + get IP info
+    setup_vpn()
+    
+    # Load keywords from FGOS
+    keywords = load_keywords_from_fgos()
+    log(f"\n📋 Keywords to scrape ({len(keywords)}):")
+    for i, kw in enumerate(keywords, 1):
+        log(f"   {i}. {kw}")
+    
+    # Create browser
+    camoufox = None
+    page = None
+    all_results = {}
+    phase2_results = []
+    
+    try:
+        camoufox, page = await create_browser()
+        log("✅ Browser ready")
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # PHASE 1: KEYWORD SCRAPING (FGOS Distributed)
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        if not CONTROL['skip_to_phase2']:
+            log("\n" + "="*70)
+            log("📋 PHASE 1: KEYWORD SCRAPING (FGOS Distributed)")
+            log("="*70)
+            
+            send_heartbeat("PHASE1_STARTED", f"Starting keyword scraping ({len(keywords)} keywords)")
+            
+            # Scrape keywords using FGOS atomic claiming
+            keywords_scraped_this_session = 0
+            
+            while not CONTROL['skip_to_phase2'] and not CONTROL['quit']:
+                # Check controls
+                ctrl = await check_controls()
+                if ctrl == False:  # Quit
+                    log("🛑 Quit requested, stopping")
+                    break
+                if ctrl == 'skip':
+                    continue
+                if CONTROL['skip_to_phase2']:
+                    log("⏭️ Skipping to Phase 2...")
+                    break
+                
+                # Claim next keyword from FGOS
+                kw_index, keyword, claim_err = fgos_claim_keyword()
+                
+                if keyword is None and claim_err:
+                    # API error — retry up to 3 times with delay
+                    claim_retries = 3
+                    for retry in range(1, claim_retries + 1):
+                        log(f"   🔄 Retrying claim in 10s... ({retry}/{claim_retries})")
+                        await asyncio.sleep(10)
+                        kw_index, keyword, claim_err = fgos_claim_keyword()
+                        if keyword is not None or claim_err is None:
+                            break
+                    if keyword is None and claim_err:
+                        log("❌ Claim-keyword failed after retries, stopping Phase 1")
+                        break
+                
+                if keyword is None:
+                    log("✅ All keywords claimed! Phase 1 complete.")
+                    break
+                
+                keywords_scraped_this_session += 1
+                
+                log(f"\n{'='*70}")
+                log(f"📌 KEYWORD #{kw_index}: '{keyword}' (session: {keywords_scraped_this_session})")
+                log(f"{'='*70}")
+                
+                # Retry keyword up to 2 times on navigation/browser errors
+                max_kw_retries = 2
+                kw_success = False
+                for kw_attempt in range(1, max_kw_retries + 1):
+                    try:
+                        if kw_attempt > 1:
+                            log(f"🔄 Retrying keyword '{keyword}' (attempt {kw_attempt}/{max_kw_retries})")
+                            await asyncio.sleep(5)
+                        
+                        gigs = await scrape_keyword_all_pages(page, keyword)
+                        
+                        if gigs:
+                            all_results[keyword] = gigs
+                            
+                            # Save this keyword's results immediately to FGOS
+                            save_keyword_results(keyword, gigs)
+                            fgos_keyword_done(keyword, len(gigs), MAX_PAGES, gigs)
+                        else:
+                            fgos_keyword_done(keyword, 0, 0)
+                        
+                        kw_success = True
+                        break
+                        
+                    except Exception as e:
+                        err_str = str(e)
+                        log(f"❌ Error scraping '{keyword}' (attempt {kw_attempt}): {err_str[:100]}")
+                        # Only retry on navigation/network errors
+                        if kw_attempt < max_kw_retries and any(x in err_str for x in 
+                            ['NS_BINDING_ABORTED', 'NS_ERROR', 'Timeout', 'timeout', 'ERR_', 'ECONNRESET']):
+                            continue
+                        else:
+                            fgos_keyword_failed(keyword, e)
+                            break
+                
+                # Delay between keywords
+                if not CONTROL['skip_to_phase2']:
+                    delay = random.uniform(5, 10)
+                    log(f"\n⏳ Waiting {delay:.1f}s before next keyword...")
+                    await asyncio.sleep(delay)
+            
+            # Phase 1 summary
+            if all_results and not CONTROL['quit']:
+                log(f"\n{'='*70}")
+                log("📊 PHASE 1 SUMMARY")
+                log(f"{'='*70}")
+                save_session_summary(all_results)
+                
+                total_gigs = sum(len(g) for g in all_results.values())
+                log(f"✅ Phase 1 complete: {len(all_results)} keywords, {total_gigs} gigs")
+                send_heartbeat("PHASE1_COMPLETED", f"Done! {len(all_results)} keywords, {total_gigs} gigs")
+        else:
+            log("⏭️ Phase 1 skipped (jumping to Phase 2)")
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # PHASE 2: ONE BROWSER, MULTIPLE TABS (FGOS-driven)
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        if not CONTROL['quit'] and not CONTROL['phase1_only']:
+            log("\n" + "="*70)
+            log(f"🚀 Starting Phase 2: ONE browser with {NUM_BROWSERS} TABS in 5 seconds...")
+            log("   ⚡ Mode: Lightweight (no images/CSS/fonts)")
+            log("   📑 All tabs share ONE browser = safer, less memory")
+            log("   🌐 Gig claiming via FGOS fleet API")
+            log("   Press [Q] to quit, [P] to pause")
+            log("="*70)
+            await asyncio.sleep(5)
+            
+            if not CONTROL['quit']:
+                phase2_results = await run_phase2(page, browser=camoufox)
+                camoufox = None  # Phase 2 already closed it
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # FINAL SUMMARY
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        total_gigs = sum(len(g) for g in all_results.values()) if all_results else 0
+        log(f"\n{'='*70}")
+        log("✅ ALL PHASES COMPLETE!")
+        log(f"{'='*70}")
+        log(f"   Phase 1: {len(all_results)} keywords → {total_gigs} gig URLs")
+        log(f"   Phase 2: {len(phase2_results)} gig details scraped")
+        log(f"   Session ID: {SESSION_TIMESTAMP}")
+        log(f"   📁 Data folder: {DATA_FOLDER}/")
+        log(f"   🕐 Time Period: {SESSION_PERIOD} (UTC)")
+        
+    except Exception as e:
+        error_msg = f"Fatal error: {e}"
+        log(f"❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        send_error_heartbeat(error_msg)
+    
+    finally:
+        if camoufox:
+            log("\n🔒 Closing browser...")
+            try:
+                await camoufox.__aexit__(None, None, None)
+            except:
+                pass
+        
+        # Flush remaining logs to FGOS
+        log("\n📋 Flushing logs to FGOS...")
+        flush_logs_to_fgos()
+        log("✅ Logs flushed to FGOS")
+        
+        # Send completion heartbeat
+        total_gigs = sum(len(g) for g in all_results.values()) if all_results else 0
+        send_complete_heartbeat(f"Done! P1:{len(all_results)} keywords/{total_gigs} URLs, P2:{len(phase2_results)} details")
+        
+        log("👋 Done!")
+
+if __name__ == "__main__":
+    # Command line arguments for quick access
+    import argparse
+    parser = argparse.ArgumentParser(description='Fiverr Scraper - Phase 1 & 2')
+    parser.add_argument('--phase2', '-2', action='store_true', help='Skip Phase 1, jump to Phase 2')
+    parser.add_argument('--phase1', '-1', action='store_true', help='Run Phase 1 only (no Phase 2)')
+    args = parser.parse_args()
+    
+    if args.phase2:
+        CONTROL['skip_to_phase2'] = True
+        print("⏭️ --phase2 flag: Skipping to Phase 2")
+    
+    if args.phase1:
+        CONTROL['phase1_only'] = True
+        print("1️⃣ --phase1 flag: Phase 1 only, no Phase 2")
+    
+    asyncio.run(main())
