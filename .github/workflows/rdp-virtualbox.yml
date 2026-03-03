@@ -5,12 +5,25 @@ on:
 
 jobs:
   scrape:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 360  # 6 hours (GitHub hosted runner max)
+
+    env:
+      DISPLAY: ":99"
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      # ─── VIRTUAL DISPLAY (needed for PIA installer + browser) ───
+      - name: Start Virtual Display
+        run: |
+          echo "🖥️ Installing and starting Xvfb virtual display..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xauth
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "✅ Virtual display running on :99"
 
       # ─── PYTHON SETUP ────────────────────────────────────────────
       - name: Setup Python 3.11
@@ -20,135 +33,125 @@ jobs:
 
       - name: Install Python Dependencies
         run: |
-          Write-Host "📦 Installing Python dependencies..."
+          echo "📦 Installing Python dependencies..."
           pip install --upgrade pip
           pip install playwright requests certifi "camoufox[geoip]" browserforge
           
-          Write-Host "🦊 Installing Playwright Firefox..."
+          echo "🦊 Installing Playwright Firefox..."
           python -m playwright install firefox
+          python -m playwright install-deps firefox
           
-          Write-Host "🦊 Fetching Camoufox browser..."
+          echo "🦊 Fetching Camoufox browser..."
           python -m camoufox fetch
           
-          Write-Host "✅ All dependencies installed!"
+          echo "✅ All dependencies installed!"
 
       # ─── PIA VPN SETUP ───────────────────────────────────────────
       - name: Install PIA VPN
         run: |
-          Write-Host "🌐 Downloading PIA VPN installer from R2..."
-          $piaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-windows-x64-3.7-08412%20(1).exe"
-          $piaInstaller = "$env:TEMP\pia-install.exe"
+          echo "🌐 Downloading PIA VPN Linux installer from R2..."
+          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-x64.run"
+          PIA_INSTALLER="/tmp/pia-install.run"
           
-          Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller -UseBasicParsing
+          curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
           
-          $fileSize = (Get-Item $piaInstaller).Length
-          Write-Host "📥 Downloaded: $([math]::Round($fileSize / 1MB, 1)) MB"
+          FILE_SIZE=$(stat -c%s "$PIA_INSTALLER")
+          echo "📥 Downloaded: $(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB"
           
-          if ($fileSize -lt 1000000) {
-              Write-Error "❌ Download too small ($fileSize bytes) - likely failed"
-              exit 1
-          }
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+            echo "❌ Download too small ($FILE_SIZE bytes) - likely failed"
+            exit 1
+          fi
           
-          # PIA 3.x uses Qt Installer Framework (QtIFW) - try multiple silent approaches
-          Write-Host "📦 Attempt 1: QtIFW silent install..."
-          $proc = Start-Process -FilePath $piaInstaller -ArgumentList "install","--al","-c" -Wait -PassThru
-          Write-Host "   Exit code: $($proc.ExitCode)"
+          echo "📦 Installing PIA VPN (official sh method)..."
+          chmod +x "$PIA_INSTALLER"
           
-          $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
-          if (-not (Test-Path $piactl)) {
-              Write-Host "📦 Attempt 2: NSIS /S flag..."
-              $proc = Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait -PassThru
-              Write-Host "   Exit code: $($proc.ExitCode)"
-          }
+          # Run installer: pipe 'y' for any prompts, use sudo
+          echo "y" | sudo sh "$PIA_INSTALLER" || true
           
-          if (-not (Test-Path $piactl)) {
-              Write-Host "📦 Attempt 3: --silent flag..."
-              $proc = Start-Process -FilePath $piaInstaller -ArgumentList "--silent" -Wait -PassThru
-              Write-Host "   Exit code: $($proc.ExitCode)"
-          }
+          # Wait for install + daemon to start
+          sleep 15
           
-          if (-not (Test-Path $piactl)) {
-              Write-Host "📦 Attempt 4: /VERYSILENT /SUPPRESSMSGBOXES (InnoSetup)..."
-              $proc = Start-Process -FilePath $piaInstaller -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
-              Write-Host "   Exit code: $($proc.ExitCode)"
-          }
+          # Check multiple known install locations
+          PIACTL=""
+          if command -v piactl &>/dev/null; then
+            PIACTL=$(command -v piactl)
+          elif [ -f "/opt/piavpn/bin/piactl" ]; then
+            PIACTL="/opt/piavpn/bin/piactl"
+          elif [ -f "/usr/local/bin/piactl" ]; then
+            PIACTL="/usr/local/bin/piactl"
+          fi
           
-          # Wait a bit for services to register
-          Start-Sleep -Seconds 15
-          
-          # Check result
-          if (Test-Path $piactl) {
-              Write-Host "✅ PIA VPN installed successfully!"
-          } else {
-              Write-Host "❌ All install attempts failed. Diagnostics:"
-              Write-Host ""
-              Write-Host "🔍 Searching entire C: for piactl.exe..."
-              Get-ChildItem "C:\Program Files" -Recurse -Filter "piactl.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   Found: $($_.FullName)" }
-              Get-ChildItem "C:\Program Files (x86)" -Recurse -Filter "piactl.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   Found: $($_.FullName)" }
-              Write-Host ""
-              Write-Host "📂 Program Files folders with PIA/Private:"
-              Get-ChildItem "C:\Program Files" | Where-Object { $_.Name -like "*PIA*" -or $_.Name -like "*Private*" -or $_.Name -like "*Internet*" } | ForEach-Object { Write-Host "   $($_.FullName)" }
-              Get-ChildItem "C:\Program Files (x86)" | Where-Object { $_.Name -like "*PIA*" -or $_.Name -like "*Private*" -or $_.Name -like "*Internet*" } | ForEach-Object { Write-Host "   $($_.FullName)" }
-              Write-Host ""
-              Write-Host "📂 Installer TEMP artifacts:"
-              Get-ChildItem $env:TEMP -Filter "*pia*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $($_.FullName)" }
-              Get-ChildItem $env:TEMP -Filter "*private*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $($_.FullName)" }
-              Write-Host ""
-              Write-Host "📋 Recent installer logs in TEMP:"
-              Get-ChildItem $env:TEMP -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 10 | ForEach-Object { Write-Host "   $($_.Name) ($($_.Length) bytes, $($_.LastWriteTime))" }
-              Write-Host ""
-              Write-Host "📋 Services with PIA/Private:"
-              Get-Service | Where-Object { $_.DisplayName -like "*PIA*" -or $_.DisplayName -like "*Private*" } | ForEach-Object { Write-Host "   $($_.Name): $($_.Status)" }
-              Write-Host ""
-              Write-Host "📋 Installer file info:"
-              $sig = Get-AuthenticodeSignature $piaInstaller -ErrorAction SilentlyContinue
-              Write-Host "   Signature: $($sig.Status) - $($sig.SignerCertificate.Subject)"
-              Write-Error "❌ PIA VPN installation failed after all attempts"
-              exit 1
-          }
+          if [ -n "$PIACTL" ]; then
+            echo "✅ PIA VPN installed at: $PIACTL"
+            "$PIACTL" --version || true
+            # Check if daemon is running
+            echo "📋 PIA daemon status:"
+            systemctl status piavpn 2>/dev/null || true
+            ps aux | grep -i pia | grep -v grep || true
+          else
+            echo "❌ piactl not found after install. Diagnostics:"
+            echo ""
+            echo "🔍 Searching for piactl..."
+            sudo find / -name "piactl" -type f 2>/dev/null || true
+            echo ""
+            echo "🔍 Searching for pia* binaries..."
+            sudo find /opt /usr/local /usr/bin -name "pia*" 2>/dev/null || true
+            echo ""
+            echo "📂 /opt contents:"
+            ls -la /opt/ 2>/dev/null || true
+            ls -la /opt/piavpn/ 2>/dev/null || true
+            echo ""
+            echo "📋 Recent installer output in syslog:"
+            sudo tail -30 /var/log/syslog 2>/dev/null | grep -i pia || true
+            echo ""
+            echo "📋 systemd services with pia:"
+            systemctl list-units --all | grep -i pia || true
+            exit 1
+          fi
 
       - name: Login and Connect PIA VPN
         run: |
-          $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
+          # Make sure piactl is in PATH
+          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
           
           # Enable background mode (no GUI needed)
-          & $piactl background enable
-          Start-Sleep -Seconds 3
+          piactl background enable || true
+          sleep 3
           
           # Login using credentials file
-          $credsFile = "$env:TEMP\pia-creds.txt"
-          "p8158950`nGoYoula@niba12`$2323" | Out-File -FilePath $credsFile -Encoding ascii -NoNewline
-          & $piactl login $credsFile
-          Remove-Item $credsFile -Force
-          Start-Sleep -Seconds 5
+          CREDS_FILE=$(mktemp)
+          printf 'p8158950\nGoYoula@niba12$2323' > "$CREDS_FILE"
+          piactl login "$CREDS_FILE"
+          rm -f "$CREDS_FILE"
+          sleep 5
           
-          # Set a random US location and connect
-          $locations = @("us-east", "us-west", "us-california", "us-chicago", "us-texas", "us-florida", "us-atlanta", "us-denver", "us-seattle", "us-new-york-city")
-          $location = $locations | Get-Random
-          Write-Host "🌐 Connecting to PIA: $location"
-          & $piactl set region $location
-          & $piactl connect
+          # Pick a random US location and connect
+          LOCATIONS=("us-east" "us-west" "us-california" "us-chicago" "us-texas" "us-florida" "us-atlanta" "us-denver" "us-seattle" "us-new-york-city")
+          LOCATION=${LOCATIONS[$RANDOM % ${#LOCATIONS[@]}]}
+          echo "🌐 Connecting to PIA: $LOCATION"
+          piactl set region "$LOCATION"
+          piactl connect
           
           # Wait for connection (max 30s)
-          $connected = $false
-          for ($i = 0; $i -lt 15; $i++) {
-              Start-Sleep -Seconds 2
-              $state = & $piactl get connectionstate
-              Write-Host "   ⏳ State: $state ($($i+1)/15)"
-              if ($state -eq "Connected") {
-                  $connected = $true
-                  break
-              }
-          }
+          CONNECTED=false
+          for i in $(seq 1 15); do
+            sleep 2
+            STATE=$(piactl get connectionstate)
+            echo "   ⏳ State: $STATE ($i/15)"
+            if [ "$STATE" = "Connected" ]; then
+              CONNECTED=true
+              break
+            fi
+          done
           
-          if ($connected) {
-              Write-Host "✅ PIA VPN connected to $location!"
-              # Show new IP
-              $ip = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 10).Content
-              Write-Host "📍 Public IP: $ip"
-          } else {
-              Write-Host "⚠️ VPN connection slow, Mainbot.py will handle it"
-          }
+          if [ "$CONNECTED" = true ]; then
+            echo "✅ PIA VPN connected to $LOCATION!"
+            IP=$(curl -s --max-time 10 https://api.ipify.org)
+            echo "📍 Public IP: $IP"
+          else
+            echo "⚠️ VPN connection slow, Mainbot.py will handle it"
+          fi
 
       # ─── RUN THE SCRAPER ─────────────────────────────────────────
       - name: Run Scraper
@@ -157,13 +160,17 @@ jobs:
           PIA_PASSWORD: "GoYoula@niba12$2323"
           FGOS_API_KEY: "fgos-scraper-key-2026-secure"
         run: |
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "  🚀 Starting Fiverr Scraper (FGOS Fleet)"
-          Write-Host "=========================================="
-          Write-Host "  Mode: Direct on runner + PIA VPN"
-          Write-Host "  Backend: FGOS Fleet API"
-          Write-Host "=========================================="
-          Write-Host ""
+          echo ""
+          echo "=========================================="
+          echo "  🚀 Starting Fiverr Scraper (FGOS Fleet)"
+          echo "=========================================="
+          echo "  Mode: Direct on runner + PIA VPN"
+          echo "  Backend: FGOS Fleet API"
+          echo "  Display: Virtual (Xvfb :99)"
+          echo "=========================================="
+          echo ""
+          
+          # Make sure piactl is in PATH
+          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
           
           python Mainbot.py
