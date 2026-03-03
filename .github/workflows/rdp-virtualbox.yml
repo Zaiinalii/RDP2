@@ -41,17 +41,38 @@ jobs:
           
           Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller -UseBasicParsing
           
-          Write-Host "📦 Installing PIA VPN silently..."
-          Start-Process -FilePath $piaInstaller -ArgumentList "--silent" -Wait
+          $fileSize = (Get-Item $piaInstaller).Length
+          Write-Host "📥 Downloaded: $([math]::Round($fileSize / 1MB, 1)) MB"
           
-          # Wait for PIA service to fully start
-          Start-Sleep -Seconds 20
+          if ($fileSize -lt 1000000) {
+              Write-Error "❌ Download too small ($fileSize bytes) - likely failed"
+              exit 1
+          }
           
+          Write-Host "📦 Installing PIA VPN silently (NSIS /S flag)..."
+          Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait
+          
+          # Poll for piactl.exe (installer may spawn sub-processes)
           $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
-          if (Test-Path $piactl) {
+          $found = $false
+          for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 5
+              Write-Host "   ⏳ Waiting for PIA install... ($($i*5)s)"
+              if (Test-Path $piactl) {
+                  $found = $true
+                  break
+              }
+          }
+          
+          if ($found) {
               Write-Host "✅ PIA VPN installed successfully!"
           } else {
-              Write-Error "❌ PIA VPN installation failed!"
+              Write-Host "🔍 Searching for piactl.exe..."
+              Get-ChildItem "C:\Program Files" -Recurse -Filter "piactl.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   Found: $($_.FullName)" }
+              Get-ChildItem "C:\Program Files (x86)" -Recurse -Filter "piactl.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   Found: $($_.FullName)" }
+              Write-Host "📂 Program Files contents:"
+              Get-ChildItem "C:\Program Files" | Where-Object { $_.Name -like "*PIA*" -or $_.Name -like "*Private*" } | ForEach-Object { Write-Host "   $($_.Name)" }
+              Write-Error "❌ PIA VPN installation failed - piactl.exe not found"
               exit 1
           }
 
