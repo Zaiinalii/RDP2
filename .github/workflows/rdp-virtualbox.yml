@@ -14,14 +14,14 @@ jobs:
 
       - name: Download VirtualBox and OVA
         run: |
-          $dest = "C:\Users\Administrator\Desktop\Public"
+          $dest = "$env:USERPROFILE\Desktop\Public"
           if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
 
           Write-Host "Downloading OVA..."
           Invoke-WebRequest `
             -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem%201.ova" `
-                  -OutFile "$dest\Nadeem.ova" `
-                  -UseBasicParsing
+            -OutFile "$dest\Nadeem 1.ova" `
+            -UseBasicParsing
 
           Write-Host "Downloading VirtualBox installer..."
           Invoke-WebRequest `
@@ -31,7 +31,7 @@ jobs:
 
       - name: Install VirtualBox Silently
         run: |
-          $vbInstaller = "C:\Users\Administrator\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
+          $vbInstaller = "$env:USERPROFILE\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
           Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
           
           # Wait for VirtualBox to fully install
@@ -50,7 +50,7 @@ jobs:
       - name: Import and Start OVA VM
         run: |
           $vboxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $ovaPath = "C:\Users\Administrator\Desktop\Public\Nadeem.ova"
+          $ovaPath = "$env:USERPROFILE\Desktop\Public\Nadeem 1.ova"
           $vmName = "Nadeem"
           
           Write-Host "📦 Importing OVA: $ovaPath"
