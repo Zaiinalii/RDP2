@@ -50,7 +50,7 @@ jobs:
       - name: Install PIA VPN
         run: |
           echo "🌐 Downloading PIA VPN Linux installer from R2..."
-          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-x64.run"
+          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-3.7-08412.run"
           PIA_INSTALLER="/tmp/pia-install.run"
           
           curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
