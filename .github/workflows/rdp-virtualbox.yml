@@ -19,9 +19,9 @@ jobs:
 
           Write-Host "Downloading OVA..."
           Invoke-WebRequest `
-            -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem.ova" `
-            -OutFile "$dest\Nadeem.ova" `
-            -UseBasicParsing
+            -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem%201.ova" `
+                  -OutFile "$dest\Nadeem.ova" `
+                  -UseBasicParsing
 
           Write-Host "Downloading VirtualBox installer..."
           Invoke-WebRequest `
