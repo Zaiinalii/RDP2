@@ -49,30 +49,61 @@ jobs:
               exit 1
           }
           
-          Write-Host "📦 Installing PIA VPN silently (NSIS /S flag)..."
-          Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait
+          # PIA 3.x uses Qt Installer Framework (QtIFW) - try multiple silent approaches
+          Write-Host "📦 Attempt 1: QtIFW silent install..."
+          $proc = Start-Process -FilePath $piaInstaller -ArgumentList "install","--al","-c" -Wait -PassThru
+          Write-Host "   Exit code: $($proc.ExitCode)"
           
-          # Poll for piactl.exe (installer may spawn sub-processes)
           $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
-          $found = $false
-          for ($i = 0; $i -lt 30; $i++) {
-              Start-Sleep -Seconds 5
-              Write-Host "   ⏳ Waiting for PIA install... ($($i*5)s)"
-              if (Test-Path $piactl) {
-                  $found = $true
-                  break
-              }
+          if (-not (Test-Path $piactl)) {
+              Write-Host "📦 Attempt 2: NSIS /S flag..."
+              $proc = Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait -PassThru
+              Write-Host "   Exit code: $($proc.ExitCode)"
           }
           
-          if ($found) {
+          if (-not (Test-Path $piactl)) {
+              Write-Host "📦 Attempt 3: --silent flag..."
+              $proc = Start-Process -FilePath $piaInstaller -ArgumentList "--silent" -Wait -PassThru
+              Write-Host "   Exit code: $($proc.ExitCode)"
+          }
+          
+          if (-not (Test-Path $piactl)) {
+              Write-Host "📦 Attempt 4: /VERYSILENT /SUPPRESSMSGBOXES (InnoSetup)..."
+              $proc = Start-Process -FilePath $piaInstaller -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+              Write-Host "   Exit code: $($proc.ExitCode)"
+          }
+          
+          # Wait a bit for services to register
+          Start-Sleep -Seconds 15
+          
+          # Check result
+          if (Test-Path $piactl) {
               Write-Host "✅ PIA VPN installed successfully!"
           } else {
-              Write-Host "🔍 Searching for piactl.exe..."
+              Write-Host "❌ All install attempts failed. Diagnostics:"
+              Write-Host ""
+              Write-Host "🔍 Searching entire C: for piactl.exe..."
               Get-ChildItem "C:\Program Files" -Recurse -Filter "piactl.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   Found: $($_.FullName)" }
               Get-ChildItem "C:\Program Files (x86)" -Recurse -Filter "piactl.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   Found: $($_.FullName)" }
-              Write-Host "📂 Program Files contents:"
-              Get-ChildItem "C:\Program Files" | Where-Object { $_.Name -like "*PIA*" -or $_.Name -like "*Private*" } | ForEach-Object { Write-Host "   $($_.Name)" }
-              Write-Error "❌ PIA VPN installation failed - piactl.exe not found"
+              Write-Host ""
+              Write-Host "📂 Program Files folders with PIA/Private:"
+              Get-ChildItem "C:\Program Files" | Where-Object { $_.Name -like "*PIA*" -or $_.Name -like "*Private*" -or $_.Name -like "*Internet*" } | ForEach-Object { Write-Host "   $($_.FullName)" }
+              Get-ChildItem "C:\Program Files (x86)" | Where-Object { $_.Name -like "*PIA*" -or $_.Name -like "*Private*" -or $_.Name -like "*Internet*" } | ForEach-Object { Write-Host "   $($_.FullName)" }
+              Write-Host ""
+              Write-Host "📂 Installer TEMP artifacts:"
+              Get-ChildItem $env:TEMP -Filter "*pia*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $($_.FullName)" }
+              Get-ChildItem $env:TEMP -Filter "*private*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $($_.FullName)" }
+              Write-Host ""
+              Write-Host "📋 Recent installer logs in TEMP:"
+              Get-ChildItem $env:TEMP -Filter "*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 10 | ForEach-Object { Write-Host "   $($_.Name) ($($_.Length) bytes, $($_.LastWriteTime))" }
+              Write-Host ""
+              Write-Host "📋 Services with PIA/Private:"
+              Get-Service | Where-Object { $_.DisplayName -like "*PIA*" -or $_.DisplayName -like "*Private*" } | ForEach-Object { Write-Host "   $($_.Name): $($_.Status)" }
+              Write-Host ""
+              Write-Host "📋 Installer file info:"
+              $sig = Get-AuthenticodeSignature $piaInstaller -ErrorAction SilentlyContinue
+              Write-Host "   Signature: $($sig.Status) - $($sig.SignerCertificate.Subject)"
+              Write-Error "❌ PIA VPN installation failed after all attempts"
               exit 1
           }
 
