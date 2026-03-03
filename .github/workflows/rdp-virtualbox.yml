@@ -63,11 +63,11 @@ jobs:
             exit 1
           fi
           
-          echo "📦 Installing PIA VPN (official sh method)..."
+          echo "📦 Installing PIA VPN (official sh method - as normal user)..."
           chmod +x "$PIA_INSTALLER"
           
-          # Run installer: pipe 'y' for any prompts, use sudo
-          echo "y" | sudo sh "$PIA_INSTALLER" || true
+          # PIA requires running as normal user, NOT root
+          sh "$PIA_INSTALLER" || true
           
           # Wait for install + daemon to start
           sleep 15
