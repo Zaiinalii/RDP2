@@ -56,9 +56,6 @@ jobs:
           }
 
       - name: Login and Connect PIA VPN
-        env:
-          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
-          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
         run: |
           $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
           
@@ -68,7 +65,7 @@ jobs:
           
           # Login using credentials file
           $credsFile = "$env:TEMP\pia-creds.txt"
-          "$env:PIA_USERNAME`n$env:PIA_PASSWORD" | Out-File -FilePath $credsFile -Encoding ascii -NoNewline
+          "p8158950`nGoYoula@niba12`$2323" | Out-File -FilePath $credsFile -Encoding ascii -NoNewline
           & $piactl login $credsFile
           Remove-Item $credsFile -Force
           Start-Sleep -Seconds 5
@@ -104,9 +101,9 @@ jobs:
       # ─── RUN THE SCRAPER ─────────────────────────────────────────
       - name: Run Scraper
         env:
-          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
-          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
-          FGOS_API_KEY: ${{ secrets.FGOS_API_KEY }}
+          PIA_USERNAME: "p8158950"
+          PIA_PASSWORD: "GoYoula@niba12$2323"
+          FGOS_API_KEY: "fgos-scraper-key-2026-secure"
         run: |
           Write-Host ""
           Write-Host "=========================================="
