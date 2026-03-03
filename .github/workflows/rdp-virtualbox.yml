@@ -95,7 +95,7 @@ jobs:
           Write-Host "    ✅ VM 'Nadeem' is running!"
           Write-Host "=========================================="
           Write-Host "The scraper inside the VM should be running automatically."
-          Write-Host "Check GitHub repo for logs and scraped data."
+          Write-Host "Check FGOS dashboard for logs and scraped data."
           Write-Host "==========================================`n"
           
           while ($true) {
