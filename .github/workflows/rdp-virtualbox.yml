@@ -35,8 +35,8 @@ jobs:
       # ─── PIA VPN SETUP ───────────────────────────────────────────
       - name: Install PIA VPN
         run: |
-          Write-Host "🌐 Downloading PIA VPN installer..."
-          $piaUrl = "https://installers.privateinternetaccess.com/download/pia-windows-x64.exe"
+          Write-Host "🌐 Downloading PIA VPN installer from R2..."
+          $piaUrl = "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-windows-x64-3.7-08412%20(1).exe"
           $piaInstaller = "$env:TEMP\pia-install.exe"
           
           Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller -UseBasicParsing
