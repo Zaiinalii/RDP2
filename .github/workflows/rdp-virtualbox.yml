@@ -1,105 +1,120 @@
-name: VirtualBox VM Runner
+name: Fiverr Scraper (Direct + PIA VPN)
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-vm:
+  scrape:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360  # 6 hours (GitHub hosted runner max)
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Download VirtualBox and OVA
+      # ─── PYTHON SETUP ────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
         run: |
-          $dest = "$env:USERPROFILE\Desktop\Public"
-          if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+          Write-Host "📦 Installing Python dependencies..."
+          pip install --upgrade pip
+          pip install playwright requests certifi "camoufox[geoip]" browserforge
+          
+          Write-Host "🦊 Installing Playwright Firefox..."
+          python -m playwright install firefox
+          
+          Write-Host "🦊 Fetching Camoufox browser..."
+          python -m camoufox fetch
+          
+          Write-Host "✅ All dependencies installed!"
 
-          Write-Host "Downloading OVA..."
-          Invoke-WebRequest `
-            -Uri "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Nadeem%201.ova" `
-            -OutFile "$dest\Nadeem 1.ova" `
-            -UseBasicParsing
-
-          Write-Host "Downloading VirtualBox installer..."
-          Invoke-WebRequest `
-            -Uri "https://download.virtualbox.org/virtualbox/7.2.4/VirtualBox-7.2.4-170995-Win.exe" `
-            -OutFile "$dest\VirtualBox-7.2.4-170995-Win.exe" `
-            -UseBasicParsing
-
-      - name: Install VirtualBox Silently
+      # ─── PIA VPN SETUP ───────────────────────────────────────────
+      - name: Install PIA VPN
         run: |
-          $vbInstaller = "$env:USERPROFILE\Desktop\Public\VirtualBox-7.2.4-170995-Win.exe"
-          Start-Process -FilePath $vbInstaller -ArgumentList "--silent --msiparams ALLUSERS=2" -Wait
+          Write-Host "🌐 Downloading PIA VPN installer..."
+          $piaUrl = "https://installers.privateinternetaccess.com/download/pia-windows-x64.exe"
+          $piaInstaller = "$env:TEMP\pia-install.exe"
           
-          # Wait for VirtualBox to fully install
-          Start-Sleep -Seconds 10
+          Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller -UseBasicParsing
           
-          # Verify installation
-          $vboxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          if (Test-Path $vboxManage) {
-              Write-Host "✅ VirtualBox installed successfully!"
-              & $vboxManage --version
+          Write-Host "📦 Installing PIA VPN silently..."
+          Start-Process -FilePath $piaInstaller -ArgumentList "--silent" -Wait
+          
+          # Wait for PIA service to fully start
+          Start-Sleep -Seconds 20
+          
+          $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
+          if (Test-Path $piactl) {
+              Write-Host "✅ PIA VPN installed successfully!"
           } else {
-              Write-Error "❌ VirtualBox installation failed!"
+              Write-Error "❌ PIA VPN installation failed!"
               exit 1
           }
 
-      - name: Import and Start OVA VM
+      - name: Login and Connect PIA VPN
+        env:
+          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
         run: |
-          $vboxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-          $ovaPath = "$env:USERPROFILE\Desktop\Public\Nadeem 1.ova"
-          $vmName = "Nadeem"
+          $piactl = "C:\Program Files\Private Internet Access\piactl.exe"
           
-          Write-Host "📦 Importing OVA: $ovaPath"
-          Write-Host "This may take a few minutes..."
+          # Enable background mode (no GUI needed)
+          & $piactl background enable
+          Start-Sleep -Seconds 3
           
-          # Import the OVA
-          & $vboxManage import $ovaPath --vsys 0 --vmname $vmName
+          # Login using credentials file
+          $credsFile = "$env:TEMP\pia-creds.txt"
+          "$env:PIA_USERNAME`n$env:PIA_PASSWORD" | Out-File -FilePath $credsFile -Encoding ascii -NoNewline
+          & $piactl login $credsFile
+          Remove-Item $credsFile -Force
+          Start-Sleep -Seconds 5
           
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "❌ Failed to import OVA!"
-              exit 1
+          # Set a random US location and connect
+          $locations = @("us-east", "us-west", "us-california", "us-chicago", "us-texas", "us-florida", "us-atlanta", "us-denver", "us-seattle", "us-new-york-city")
+          $location = $locations | Get-Random
+          Write-Host "🌐 Connecting to PIA: $location"
+          & $piactl set region $location
+          & $piactl connect
+          
+          # Wait for connection (max 30s)
+          $connected = $false
+          for ($i = 0; $i -lt 15; $i++) {
+              Start-Sleep -Seconds 2
+              $state = & $piactl get connectionstate
+              Write-Host "   ⏳ State: $state ($($i+1)/15)"
+              if ($state -eq "Connected") {
+                  $connected = $true
+                  break
+              }
           }
           
-          Write-Host "✅ OVA imported successfully!"
-          
-          # List VMs to verify
-          Write-Host "`n📋 Available VMs:"
-          & $vboxManage list vms
-          
-          # Start the VM in headless mode (no GUI window needed)
-          Write-Host "`n🚀 Starting VM '$vmName' in headless mode..."
-          & $vboxManage startvm $vmName --type headless
-          
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "❌ Failed to start VM!"
-              exit 1
+          if ($connected) {
+              Write-Host "✅ PIA VPN connected to $location!"
+              # Show new IP
+              $ip = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 10).Content
+              Write-Host "📍 Public IP: $ip"
+          } else {
+              Write-Host "⚠️ VPN connection slow, Mainbot.py will handle it"
           }
-          
-          Write-Host "✅ VM '$vmName' started successfully!"
-          
-          # Wait for VM to boot
-          Write-Host "⏳ Waiting 60 seconds for VM to boot..."
-          Start-Sleep -Seconds 60
-          
-          # Show VM info
-          Write-Host "`n📊 VM Status:"
-          & $vboxManage showvminfo $vmName --machinereadable | Select-String -Pattern "VMState|memory|cpus"
 
-      - name: Keep VM Running
+      # ─── RUN THE SCRAPER ─────────────────────────────────────────
+      - name: Run Scraper
+        env:
+          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
+          FGOS_API_KEY: ${{ secrets.FGOS_API_KEY }}
         run: |
-          Write-Host "`n=========================================="
-          Write-Host "    ✅ VM 'Nadeem' is running!"
+          Write-Host ""
           Write-Host "=========================================="
-          Write-Host "The scraper inside the VM should be running automatically."
-          Write-Host "Check FGOS dashboard for logs and scraped data."
-          Write-Host "==========================================`n"
+          Write-Host "  🚀 Starting Fiverr Scraper (FGOS Fleet)"
+          Write-Host "=========================================="
+          Write-Host "  Mode: Direct on runner + PIA VPN"
+          Write-Host "  Backend: FGOS Fleet API"
+          Write-Host "=========================================="
+          Write-Host ""
           
-          while ($true) {
-              $vmStatus = & "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" showvminfo "Nadeem" --machinereadable 2>$null | Select-String "VMState="
-              Write-Host "[$(Get-Date)] VM Status: $vmStatus"
-              Start-Sleep -Seconds 300
-          }
+          python Mainbot.py
