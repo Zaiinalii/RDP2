@@ -92,13 +92,52 @@ jobs:
           # Enable autoconnect for reliability
           sudo nordvpn set autoconnect on 2>/dev/null || true
           
-          echo "✅ NordVPN ready. VPN connect handled by Mainbot.py"
+          echo "✅ NordVPN ready. VPC connect handled by Mainbot.py"
+
+      # ─── VERIFY VPN CONNECTION ──────────────────────────────────
+      - name: Verify NordVPN Connected
+        run: |
+          echo "🔍 Verifying VPN connection..."
+          
+          # Check status
+          for i in {1..15}; do
+            if nordvpn status | grep -q "connected"; then
+              echo "✅ VPN is connected!"
+              nordvpn status
+              break
+            fi
+            if [ $i -eq 15 ]; then
+              echo "❌ VPN failed to connect after 30s"
+              exit 1
+            fi
+            echo "   ⏳ Waiting... ($i/15)"
+            sleep 2
+          done
+          
+          # Check IP info
+          echo ""
+          echo "📍 IP Information:"
+          curl -s http://ip-api.com/json/ | jq '.country, .city, .isp' 2>/dev/null || curl -s http://ip-api.com/json/
 
       # ─── RUN THE SCRAPER ─────────────────────────────────────────
       - name: Download Mainbot.py from R2
         run: |
           curl -fSL "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py" -o Mainbot.py
-          echo "✅ Downloaded Mainbot.py ($(stat -c%s Mainbot.py) bytes)"
+          
+          if [ ! -f Mainbot.py ]; then
+            echo "❌ Failed to download Mainbot.py"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(stat -c%s Mainbot.py 2>/dev/null || stat -f%z Mainbot.py 2>/dev/null)
+          if [ "$FILE_SIZE" -lt 10000 ]; then
+            echo "❌ Downloaded file too small ($FILE_SIZE bytes) - likely failed"
+            head -20 Mainbot.py
+            exit 1
+          fi
+          
+          echo "✅ Downloaded Mainbot.py ($FILE_SIZE bytes)"
+          ls -lah Mainbot.py
 
       - name: Run Scraper (background + watchdog)
         env:
@@ -110,12 +149,23 @@ jobs:
           echo "=========================================="
           echo "  🚀 Starting Fiverr Scraper (Background)"
           echo "=========================================="
+          echo ""
+          echo "📋 Python version:"
+          python --version
+          echo ""
+          echo "📋 Mainbot.py info:"
+          ls -lah Mainbot.py
+          echo ""
+          
+          # Create log file early so it exists even if script fails immediately
+          touch /tmp/scraper.log
           
           # ── Launch Mainbot.py in background, log to file ──
           python Mainbot.py > /tmp/scraper.log 2>&1 &
           BOT_PID=$!
           echo "✅ Mainbot.py started (PID: $BOT_PID)"
           echo "   Logs → /tmp/scraper.log"
+          echo ""
           
           # ── Watchdog: keep runner alive while bot runs ──
           # Prints a heartbeat every 5 min so GitHub doesn't kill for inactivity
@@ -129,7 +179,8 @@ jobs:
             echo "💓 [$MINUTES min] Scraper still running (PID $BOT_PID)"
             
             # Show last 3 lines of log for quick status
-            tail -3 /tmp/scraper.log 2>/dev/null || true
+            echo "   📄 Recent logs:"
+            tail -3 /tmp/scraper.log 2>/dev/null || echo "   (no logs yet)"
             echo ""
           done
           
@@ -142,12 +193,32 @@ jobs:
           echo "  🏁 Scraper finished (exit code: $EXIT_CODE)"
           echo "=========================================="
           echo ""
-          echo "📋 Last 50 lines of log:"
-          tail -50 /tmp/scraper.log 2>/dev/null || true
+          
+          # Show log if it exists
+          if [ -f /tmp/scraper.log ]; then
+            echo "📋 Last 100 lines of log:"
+            tail -100 /tmp/scraper.log
+          else
+            echo "❌ No log file found at /tmp/scraper.log"
+          fi
           
           exit $EXIT_CODE
 
       # ─── UPLOAD LOG AS ARTIFACT (always, even on failure) ────────
+      - name: Check log file before upload
+        if: always()
+        run: |
+          echo "📋 Checking log file..."
+          if [ -f /tmp/scraper.log ]; then
+            echo "✅ Log file exists"
+            ls -lah /tmp/scraper.log
+            echo "📊 File size: $(stat -c%s /tmp/scraper.log 2>/dev/null || stat -f%z /tmp/scraper.log) bytes"
+          else
+            echo "❌ Log file not found - creating empty one"
+            mkdir -p /tmp
+            echo "No log file was created by the scraper" > /tmp/scraper.log
+          fi
+
       - name: Upload scraper log
         if: always()
         uses: actions/upload-artifact@v4
