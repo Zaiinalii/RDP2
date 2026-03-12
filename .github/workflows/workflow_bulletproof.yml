@@ -57,37 +57,42 @@ jobs:
       # ─── NORDVPN VPN SETUP ──────────────────────────────────────
       - name: Install NordVPN
         run: |
-          echo "🌐 Setting up NordVPN repository..."
+          echo "🌐 Installing NordVPN via snap..."
           
-          # Add NordVPN GPG key
-          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 63C4A4AB97344D65 2>/dev/null || true
+          # Snap is usually pre-installed on GitHub runners
+          # If not, install it
+          if ! command -v snap &> /dev/null; then
+            echo "📦 Installing snap..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq snapd
+            sleep 5
+          fi
           
-          # Add NordVPN repository
-          sudo sh -c 'echo "deb https://repo.nordvpn.com/deb/nordvpn/debian stable main" > /etc/apt/sources.list.d/nordvpn.list'
+          echo "📦 Installing nordvpn snap..."
+          sudo snap install nordvpn --stable 2>&1 | tail -10 || true
           
-          echo "📦 Updating package list..."
-          sudo apt-get update -qq 2>&1 | tail -5
-          
-          echo "🌐 Installing NordVPN..."
-          sudo apt-get install -y -qq nordvpn
+          # Give it a moment to settle
+          sleep 3
           
           echo "✅ NordVPN installed"
-          nordvpn --version || true
+          nordvpn --version || /snap/bin/nordvpn --version || true
           
-          # Wait for daemon to start
-          echo "⏳ Waiting for NordVPN daemon..."
-          for i in $(seq 1 15); do
-            sleep 2
-            if sudo systemctl is-active --quiet nordvpn 2>/dev/null; then
-              echo "✅ NordVPN daemon is running"
+          # Start nordvpn snap service
+          echo "⏳ Starting NordVPN daemon..."
+          sudo snap start nordvpn 2>/dev/null || true
+          sleep 3
+          
+          # Check if it's running
+          for i in {1..10}; do
+            if /snap/bin/nordvpn status 2>/dev/null | grep -q "Not logged in\|Disconnected\|Connected"; then
+              echo "✅ NordVPN daemon is responding"
               break
             fi
-            if [ $i -eq 15 ]; then
-              echo "⚠️ Daemon not auto-started, starting manually..."
-              sudo systemctl start nordvpn || sudo /usr/sbin/nordvpnd || true
-              sleep 3
+            if [ $i -eq 10 ]; then
+              echo "⚠️ Daemon slow to respond, continuing anyway..."
             fi
-            echo "   ⏳ Attempt $i/15..."
+            echo "   ⏳ Attempt $i/10..."
+            sleep 2
           done
 
       - name: Login NordVPN
