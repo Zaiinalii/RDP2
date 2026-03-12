@@ -57,8 +57,18 @@ jobs:
       # ─── NORDVPN VPN SETUP ──────────────────────────────────────
       - name: Install NordVPN
         run: |
+          echo "🌐 Setting up NordVPN repository..."
+          
+          # Add NordVPN GPG key
+          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 63C4A4AB97344D65 2>/dev/null || true
+          
+          # Add NordVPN repository
+          sudo sh -c 'echo "deb https://repo.nordvpn.com/deb/nordvpn/debian stable main" > /etc/apt/sources.list.d/nordvpn.list'
+          
+          echo "📦 Updating package list..."
+          sudo apt-get update -qq 2>&1 | tail -5
+          
           echo "🌐 Installing NordVPN..."
-          sudo apt-get update -qq
           sudo apt-get install -y -qq nordvpn
           
           echo "✅ NordVPN installed"
@@ -66,13 +76,18 @@ jobs:
           
           # Wait for daemon to start
           echo "⏳ Waiting for NordVPN daemon..."
-          for i in $(seq 1 10); do
+          for i in $(seq 1 15); do
             sleep 2
             if sudo systemctl is-active --quiet nordvpn 2>/dev/null; then
               echo "✅ NordVPN daemon is running"
               break
             fi
-            echo "   ⏳ Attempt $i/10..."
+            if [ $i -eq 15 ]; then
+              echo "⚠️ Daemon not auto-started, starting manually..."
+              sudo systemctl start nordvpn || sudo /usr/sbin/nordvpnd || true
+              sleep 3
+            fi
+            echo "   ⏳ Attempt $i/15..."
           done
 
       - name: Login NordVPN
