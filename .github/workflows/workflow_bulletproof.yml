@@ -54,106 +54,101 @@ jobs:
           python -m camoufox fetch
           echo "✅ All dependencies installed"
 
-      # ─── NORDVPN VPN SETUP ──────────────────────────────────────
-      - name: Install NordVPN
+      # ─── OPENVPN VPN SETUP ─────────────────────────────────────
+      - name: Install OpenVPN
         run: |
-          echo "🌐 Installing NordVPN via snap..."
-          
-          # Snap is usually pre-installed on GitHub runners
-          # If not, install it
-          if ! command -v snap &> /dev/null; then
-            echo "📦 Installing snap..."
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq snapd
-            sleep 5
+          echo "🌐 Installing OpenVPN..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openvpn jq
+          echo "✅ OpenVPN installed"
+          openvpn --version | head -1
+
+      - name: Download NordVPN OpenVPN Config
+        run: |
+          COUNTRY="${{ github.event.inputs.preferred_country }}"
+          if [ -z "$COUNTRY" ]; then
+            COUNTRY="us"
           fi
           
-          echo "📦 Installing nordvpn snap..."
-          sudo snap install nordvpn --stable 2>&1 | tail -10 || true
+          echo "🌐 Preferred country: $COUNTRY"
           
-          # Give it a moment to settle
-          sleep 3
+          # Map country to NordVPN server (update codes if servers change)
+          declare -A SERVER_MAP
+          SERVER_MAP[us]="us9365"
+          SERVER_MAP[uk]="uk1009"
+          SERVER_MAP[de]="de206"
+          SERVER_MAP[fr]="fr203"
+          SERVER_MAP[nl]="nl169"
+          SERVER_MAP[sg]="sg91"
+          SERVER_MAP[au]="au183"
+          SERVER_MAP[ca]="ca173"
+          SERVER_MAP[in]="in58"
+          SERVER_MAP[br]="br186"
           
-          echo "✅ NordVPN installed"
-          nordvpn --version || /snap/bin/nordvpn --version || true
+          SERVER="${SERVER_MAP[$COUNTRY]:-us9365}"
+          CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
           
-          # Start nordvpn snap service
-          echo "⏳ Starting NordVPN daemon..."
-          sudo snap start nordvpn 2>/dev/null || true
-          sleep 3
+          echo "📥 Downloading OpenVPN config from: $CONFIG_URL"
+          if curl -fSL "$CONFIG_URL" -o server.ovpn; then
+            echo "✅ OpenVPN config downloaded"
+            head -5 server.ovpn
+          else
+            echo "⚠️  Primary server failed, trying fallback..."
+            curl -fSL "https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/us9365.nordvpn.com.udp.ovpn" -o server.ovpn
+            if [ -s server.ovpn ]; then
+              echo "✅ Fallback config downloaded"
+            else
+              echo "❌ Failed to download OpenVPN config"
+              exit 1
+            fi
+          fi
+
+      - name: Create NordVPN Auth File
+        run: |
+          echo "🔐 Creating authentication file..."
+          echo "nadeemdepal27@gmail.com" > auth.txt
+          echo "Zain.rty123" >> auth.txt
+          chmod 600 auth.txt
+          echo "✅ Auth file created (600 permissions)"
+
+      - name: Connect to NordVPN via OpenVPN
+        run: |
+          echo "🔐 Starting OpenVPN daemon..."
+          sudo openvpn --config server.ovpn --auth-user-pass auth.txt --daemon
           
-          # Check if it's running
-          for i in {1..10}; do
-            if /snap/bin/nordvpn status 2>/dev/null | grep -q "Not logged in\|Disconnected\|Connected"; then
-              echo "✅ NordVPN daemon is responding"
+          echo "⏳ Waiting for OpenVPN to establish connection (10 seconds)..."
+          sleep 10
+          
+          echo "📋 Verifying VPN connection..."
+          for i in {1..5}; do
+            IP_INFO=$(curl -s --max-time 5 http://ip-api.com/json)
+            if echo "$IP_INFO" | jq . >/dev/null 2>&1; then
+              echo "✅ VPN connected successfully"
+              echo ""
+              echo "$IP_INFO" | jq '{country, city, isp, ip}'
+              echo ""
               break
             fi
-            if [ $i -eq 10 ]; then
-              echo "⚠️ Daemon slow to respond, continuing anyway..."
+            if [ $i -lt 5 ]; then
+              echo "   ⏳ Retry $i/5..."
+              sleep 2
+            else
+              echo "⚠️  Warning: Could not verify IP (continuing anyway)..."
             fi
-            echo "   ⏳ Attempt $i/10..."
-            sleep 2
           done
 
-      - name: Login NordVPN
+      # ─── FINAL VERIFICATION ────────────────────────────────────
+      - name: Final VPN Status Check
         run: |
-          echo "🔐 Setting up NordVPN snap permissions..."
+          echo "📡 Checking OpenVPN daemon status..."
+          ps aux | grep -i openvpn | grep -v grep || echo "⚠️  OpenVPN process not found in ps (may still be running)"
           
-          # Grant necessary permissions to NordVPN snap
-          sudo snap connect nordvpn:system-observe 2>/dev/null || true
-          sudo snap connect nordvpn:hardware-observe 2>/dev/null || true
-          sudo snap connect nordvpn:network-control 2>/dev/null || true
-          sudo snap connect nordvpn:network-observe 2>/dev/null || true
-          sudo snap connect nordvpn:firewall-control 2>/dev/null || true
-          sudo snap connect nordvpn:login-session-observe 2>/dev/null || true
-          
-          echo "✅ Permissions configured"
-          sleep 2
-          
-          echo "🔐 Logging into NordVPN with token..."
-          
-          # Retry login up to 3 times
-          for attempt in 1 2 3; do
-            if /snap/bin/nordvpn login --token "e9f2abf0e76371b2b0b9f258ba6cab4ef06267863cbe3f992f4bffd1d20da729" 2>/dev/null; then
-              echo "✅ NordVPN logged in (attempt $attempt)"
-              break
-            fi
-            echo "   ⚠️ Login attempt $attempt failed, retrying..."
-            sleep 5
-          done
-          
-          # Enable autoconnect for reliability
-          /snap/bin/nordvpn set autoconnect on 2>/dev/null || true
-          
-          echo "✅ NordVPN ready. VPN connect handled by Mainbot.py"
-
-      # ─── VERIFY VPN CONNECTION ──────────────────────────────────
-      - name: Verify NordVPN Connected
-        run: |
-          echo "🔍 Verifying VPN connection..."
-          
-          # Check status
-          for i in {1..15}; do
-            if /snap/bin/nordvpn status 2>/dev/null | grep -q "connected"; then
-              echo "✅ VPN is connected!"
-              /snap/bin/nordvpn status
-              break
-            fi
-            if [ $i -eq 15 ]; then
-              echo "❌ VPN failed to connect after 30s"
-              echo "Trying to connect to random location..."
-              /snap/bin/nordvpn connect 2>/dev/null || true
-              sleep 5
-              /snap/bin/nordvpn status 2>/dev/null || true
-            fi
-            echo "   ⏳ Waiting... ($i/15)"
-            sleep 2
-          done
-          
-          # Check IP info
           echo ""
-          echo "📍 IP Information:"
-          curl -s http://ip-api.com/json/ | jq '.country, .city, .isp' 2>/dev/null || curl -s http://ip-api.com/json/
+          echo "🌐 Final IP check:"
+          curl -s http://ip-api.com/json/ | jq . || echo "(IP check failed - continuing)"
+          
+          echo ""
+          echo "✅ VPN setup complete. Mainbot.py will handle country switching."
 
       # ─── RUN THE SCRAPER ─────────────────────────────────────────
       - name: Download Mainbot.py from R2
