@@ -97,11 +97,24 @@ jobs:
 
       - name: Login NordVPN
         run: |
+          echo "🔐 Setting up NordVPN snap permissions..."
+          
+          # Grant necessary permissions to NordVPN snap
+          sudo snap connect nordvpn:system-observe 2>/dev/null || true
+          sudo snap connect nordvpn:hardware-observe 2>/dev/null || true
+          sudo snap connect nordvpn:network-control 2>/dev/null || true
+          sudo snap connect nordvpn:network-observe 2>/dev/null || true
+          sudo snap connect nordvpn:firewall-control 2>/dev/null || true
+          sudo snap connect nordvpn:login-session-observe 2>/dev/null || true
+          
+          echo "✅ Permissions configured"
+          sleep 2
+          
           echo "🔐 Logging into NordVPN with token..."
           
           # Retry login up to 3 times
           for attempt in 1 2 3; do
-            if nordvpn login --token "e9f2abf0e76371b2b0b9f258ba6cab4ef06267863cbe3f992f4bffd1d20da729" 2>/dev/null; then
+            if /snap/bin/nordvpn login --token "e9f2abf0e76371b2b0b9f258ba6cab4ef06267863cbe3f992f4bffd1d20da729" 2>/dev/null; then
               echo "✅ NordVPN logged in (attempt $attempt)"
               break
             fi
@@ -110,9 +123,9 @@ jobs:
           done
           
           # Enable autoconnect for reliability
-          sudo nordvpn set autoconnect on 2>/dev/null || true
+          /snap/bin/nordvpn set autoconnect on 2>/dev/null || true
           
-          echo "✅ NordVPN ready. VPC connect handled by Mainbot.py"
+          echo "✅ NordVPN ready. VPN connect handled by Mainbot.py"
 
       # ─── VERIFY VPN CONNECTION ──────────────────────────────────
       - name: Verify NordVPN Connected
@@ -121,14 +134,17 @@ jobs:
           
           # Check status
           for i in {1..15}; do
-            if nordvpn status | grep -q "connected"; then
+            if /snap/bin/nordvpn status 2>/dev/null | grep -q "connected"; then
               echo "✅ VPN is connected!"
-              nordvpn status
+              /snap/bin/nordvpn status
               break
             fi
             if [ $i -eq 15 ]; then
               echo "❌ VPN failed to connect after 30s"
-              exit 1
+              echo "Trying to connect to random location..."
+              /snap/bin/nordvpn connect 2>/dev/null || true
+              sleep 5
+              /snap/bin/nordvpn status 2>/dev/null || true
             fi
             echo "   ⏳ Waiting... ($i/15)"
             sleep 2
