@@ -116,20 +116,21 @@ jobs:
         run: |
           echo "🔐 Starting OpenVPN daemon..."
           
-          # Create writable log directory
+          # Create writable log directory and file
           mkdir -p /tmp/openvpn_logs
-          sudo chmod 777 /tmp/openvpn_logs
+          touch /tmp/openvpn_logs/openvpn.log
+          chmod 666 /tmp/openvpn_logs/openvpn.log
           
-          # Start OpenVPN with log file in writable location
+          # Start OpenVPN with log file
           sudo openvpn --config server.ovpn --auth-user-pass auth.txt --daemon --log /tmp/openvpn_logs/openvpn.log
           
           echo "⏳ Waiting for OpenVPN to establish connection (15 seconds)..."
           sleep 15
           
-          # Check OpenVPN log for errors
+          # Check OpenVPN log for errors (use sudo if needed)
           echo "📋 OpenVPN log output:"
           if [ -f /tmp/openvpn_logs/openvpn.log ]; then
-            cat /tmp/openvpn_logs/openvpn.log
+            sudo cat /tmp/openvpn_logs/openvpn.log 2>/dev/null || cat /tmp/openvpn_logs/openvpn.log 2>/dev/null || echo "⚠️ Could not read log file"
           else
             echo "⚠️ OpenVPN log file not created"
           fi
